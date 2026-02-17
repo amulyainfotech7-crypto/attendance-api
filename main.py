@@ -217,7 +217,7 @@ def get_subjects_by_date(
 
     cur.execute("""
         SELECT DISTINCT s.subject_id, s.subject_name, s.type
-        FROM timetable t
+        FROM timetable_slots t
         JOIN subjects s
           ON t.subject_id = s.subject_id
          AND LOWER(t.semester)=LOWER(s.semester)
