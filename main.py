@@ -215,29 +215,34 @@ def get_subjects_by_date(
 ):
 
     try:
-        # Convert ISO date to weekday name
         parsed_date = datetime.strptime(date, "%Y-%m-%d")
-        weekday_name = parsed_date.strftime("%A")  # Monday, Tuesday...
+        weekday_name = parsed_date.strftime("%A")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format")
 
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT DISTINCT s.subject_id, s.subject_name, s.type
-        FROM timetable_slots t
-        JOIN subjects s
-          ON t.subject_id = s.subject_id
-         AND LOWER(t.semester)=LOWER(s.semester)
-         AND LOWER(t.department)=LOWER(s.department)
-        WHERE LOWER(t.department)=LOWER(?)
-          AND LOWER(t.semester)=LOWER(?)
-          AND LOWER(t.day)=LOWER(?)
-        ORDER BY t.period_no
-    """, (department, semester, weekday_name))
+    try:
+        cur.execute("""
+            SELECT DISTINCT s.subject_id, s.subject_name, s.type
+            FROM timetable_slots t
+            JOIN subjects s
+              ON t.subject_id = s.subject_id
+             AND LOWER(t.semester)=LOWER(s.semester)
+             AND LOWER(t.department)=LOWER(s.department)
+            WHERE LOWER(t.department)=LOWER(%s)
+              AND LOWER(t.semester)=LOWER(%s)
+              AND LOWER(t.day)=LOWER(%s)
+            ORDER BY t.period_no
+        """, (department, semester, weekday_name))
 
-    rows = cur.fetchall()
+        rows = cur.fetchall()
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
     conn.close()
 
     return [
@@ -248,6 +253,7 @@ def get_subjects_by_date(
         }
         for r in rows
     ]
+
 
 
 # ======================================================
