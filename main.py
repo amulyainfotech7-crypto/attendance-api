@@ -1,16 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from database import connect_db
-from models import LoginModel, StudentAttendance, AttendanceRequest
+from models import LoginModel, AttendanceRequest
 import hashlib
 import base64
-import os
-from typing import List
+from datetime import datetime
 
 app = FastAPI()
 
 # ======================================================
-# HEALTH CHECK (Required for Flutter App)
+# HEALTH CHECK
 # ======================================================
 @app.get("/health")
 def health():
@@ -18,7 +17,7 @@ def health():
 
 
 # ======================================================
-# CORS (Flutter + Web support)
+# CORS
 # ======================================================
 app.add_middleware(
     CORSMiddleware,
@@ -28,8 +27,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ======================================================
-# PASSWORD VERIFY (PBKDF2 SHA256)
+# PASSWORD VERIFY
 # ======================================================
 def verify_password(password: str, stored_hash: str) -> bool:
     try:
@@ -150,19 +150,13 @@ def login(data: LoginModel):
 # ======================================================
 @app.get("/departments")
 def get_departments():
-
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT DISTINCT department
-        FROM students
-        ORDER BY department
-    """)
-
+    cur.execute("SELECT DISTINCT department FROM students ORDER BY department")
     data = [r[0] for r in cur.fetchall()]
-    conn.close()
 
+    conn.close()
     return data
 
 
@@ -261,29 +255,8 @@ def mark_attendance(data: AttendanceRequest):
     cur = conn.cursor()
 
     try:
-        cur.execute("""
-            SELECT 1 FROM attendance_daily
-            WHERE subject_id=%s
-              AND semester=%s
-              AND section=%s
-              AND class_date=%s
-            LIMIT 1
-        """, (
-            data.subject,
-            data.semester,
-            data.section,
-            data.date
-        ))
-
-        already = cur.fetchone()
-
-        if already and not data.override:
-            return {
-                "status": "already_marked",
-                "message": "Attendance already marked"
-            }
-
-        if already:
+        # Delete existing if override
+        if data.override:
             cur.execute("""
                 DELETE FROM attendance_daily
                 WHERE subject_id=%s
@@ -302,6 +275,8 @@ def mark_attendance(data: AttendanceRequest):
                 INSERT INTO attendance_daily
                 (sbrn, subject_id, semester, section, class_date, attended)
                 VALUES (%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (sbrn, subject_id, class_date, section)
+                DO UPDATE SET attended=EXCLUDED.attended
             """, (
                 rec.sbrn,
                 data.subject,
@@ -321,3 +296,54 @@ def mark_attendance(data: AttendanceRequest):
         conn.close()
 
     return {"status": "saved"}
+
+
+# ======================================================
+# NEW: GET ATTENDANCE FOR DESKTOP SYNC
+# ======================================================
+@app.get("/attendance")
+def get_attendance(
+    department: str,
+    semester: str,
+    month: int,
+    year: int,
+    subject: str
+):
+    try:
+        conn = connect_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT a.sbrn,
+                   a.subject_id,
+                   a.section,
+                   a.class_date,
+                   a.attended
+            FROM attendance_daily a
+            JOIN students s ON a.sbrn = s.sbrn
+            WHERE LOWER(s.department)=LOWER(%s)
+              AND LOWER(a.semester)=LOWER(%s)
+              AND EXTRACT(MONTH FROM a.class_date)=%s
+              AND EXTRACT(YEAR FROM a.class_date)=%s
+              AND LOWER(a.subject_id)=LOWER(%s)
+        """, (department, semester, month, year, subject))
+
+        rows = cur.fetchall()
+
+        result = []
+        for r in rows:
+            result.append({
+                "sbrn": r[0],
+                "subject": r[1],
+                "section": r[2],
+                "day": r[3].day,
+                "month": month,
+                "year": year,
+                "status": "P" if r[4] == 1 else "A"
+            })
+
+        conn.close()
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
