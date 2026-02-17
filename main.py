@@ -64,6 +64,9 @@ def startup():
     conn = connect_db()
     cur = conn.cursor()
 
+    # ======================================================
+    # USERS TABLE
+    # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users(
             username TEXT PRIMARY KEY,
@@ -73,6 +76,9 @@ def startup():
         )
     """)
 
+    # ======================================================
+    # STUDENTS TABLE
+    # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS students(
             sbrn TEXT PRIMARY KEY,
@@ -83,6 +89,9 @@ def startup():
         )
     """)
 
+    # ======================================================
+    # SUBJECTS TABLE
+    # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS subjects(
             subject_id TEXT,
@@ -94,17 +103,28 @@ def startup():
         )
     """)
 
+    # ======================================================
+    # ✅ CORRECT TIMETABLE_SLOTS TABLE (POSTGRESQL)
+    # ======================================================
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS timetable(
+        CREATE TABLE IF NOT EXISTS timetable_slots(
+            id SERIAL PRIMARY KEY,
             department TEXT,
             semester TEXT,
-            subject_id TEXT,
-            class_date DATE,
             section TEXT,
-            PRIMARY KEY (department, semester, subject_id, class_date, section)
+            day TEXT,
+            period_no INTEGER,
+            period_len INTEGER,
+            type TEXT,
+            subject_id TEXT,
+            faculty_id TEXT,
+            room TEXT
         )
     """)
 
+    # ======================================================
+    # ATTENDANCE TABLE
+    # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_daily(
             sbrn TEXT,
@@ -120,7 +140,8 @@ def startup():
     conn.commit()
     conn.close()
 
-    print("✅ Server Ready")
+    print("✅ PostgreSQL Server Ready")
+
 
 # ======================================================
 # LOGIN
