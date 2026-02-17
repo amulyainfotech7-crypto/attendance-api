@@ -299,7 +299,7 @@ def mark_attendance(data: AttendanceRequest):
 
 
 # ======================================================
-# NEW: GET ATTENDANCE FOR DESKTOP SYNC
+# GET ATTENDANCE FOR DESKTOP SYNC (RAW FORMAT)
 # ======================================================
 @app.get("/attendance")
 def get_attendance(
@@ -316,6 +316,7 @@ def get_attendance(
         cur.execute("""
             SELECT a.sbrn,
                    a.subject_id,
+                   a.semester,
                    a.section,
                    a.class_date,
                    a.attended
@@ -334,12 +335,11 @@ def get_attendance(
         for r in rows:
             result.append({
                 "sbrn": r[0],
-                "subject": r[1],
-                "section": r[2],
-                "day": r[3].day,
-                "month": month,
-                "year": year,
-                "status": "P" if r[4] == 1 else "A"
+                "subject_id": r[1],
+                "semester": r[2],
+                "section": r[3],
+                "class_date": r[4].strftime("%Y-%m-%d"),
+                "attended": r[5]
             })
 
         conn.close()
@@ -347,3 +347,4 @@ def get_attendance(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
