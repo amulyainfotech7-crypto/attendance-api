@@ -200,32 +200,6 @@ def get_semesters(department: str):
 
     return [r[0] for r in rows]
 
-# ======================================================
-# 🔥 NEW: GET STUDENTS
-# ======================================================
-
-@app.get("/students")
-def get_students(department: str, semester: str, section: str):
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT sbrn, name
-        FROM students
-        WHERE LOWER(department)=LOWER(%s)
-          AND LOWER(semester)=LOWER(%s)
-          AND LOWER(section)=LOWER(%s)
-        ORDER BY sbrn
-    """, (department, semester, section))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    return [
-        {"sbrn": r[0], "name": r[1]}
-        for r in rows
-    ]
 
 # ======================================================
 # GET SUBJECTS BY DATE
@@ -262,6 +236,34 @@ def get_subjects_by_date(
             "subject_name": r[1],
             "type": r[2]
         }
+        for r in rows
+    ]
+
+
+# ======================================================
+# 🔥 NEW: GET STUDENTS
+# ======================================================
+
+@app.get("/students")
+def get_students(department: str, semester: str, section: str):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT sbrn, name
+        FROM students
+        WHERE LOWER(department)=LOWER(%s)
+          AND LOWER(semester)=LOWER(%s)
+          AND LOWER(section)=LOWER(%s)
+        ORDER BY sbrn
+    """, (department, semester, section))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [
+        {"sbrn": r[0], "name": r[1]}
         for r in rows
     ]
 
