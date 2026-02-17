@@ -9,16 +9,9 @@ from datetime import datetime
 app = FastAPI()
 
 # ======================================================
-# HEALTH CHECK
-# ======================================================
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-# ======================================================
 # CORS
 # ======================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,10 +20,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ======================================================
+# HEALTH CHECK
+# ======================================================
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 # ======================================================
 # PASSWORD VERIFY
 # ======================================================
+
 def verify_password(password: str, stored_hash: str) -> bool:
     try:
         algo, salt_b64, hash_b64 = stored_hash.split("$")
@@ -53,10 +54,10 @@ def verify_password(password: str, stored_hash: str) -> bool:
     except Exception:
         return False
 
-
 # ======================================================
 # STARTUP – CREATE TABLES
 # ======================================================
+
 @app.on_event("startup")
 def startup():
 
@@ -89,7 +90,7 @@ def startup():
             department TEXT,
             semester TEXT,
             type TEXT,
-            PRIMARY KEY (subject_id, semester)
+            PRIMARY KEY (subject_id, semester, department)
         )
     """)
 
@@ -119,12 +120,12 @@ def startup():
     conn.commit()
     conn.close()
 
-    print("✅ PostgreSQL Server Ready")
-
+    print("✅ Server Ready")
 
 # ======================================================
 # LOGIN
 # ======================================================
+
 @app.post("/login")
 def login(data: LoginModel):
 
@@ -155,10 +156,81 @@ def login(data: LoginModel):
         "role": user[2]
     }
 
+# ======================================================
+# 🔥 NEW: GET DEPARTMENTS
+# ======================================================
+
+@app.get("/departments")
+def get_departments():
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT DISTINCT department
+        FROM students
+        WHERE department IS NOT NULL
+        ORDER BY department
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [r[0] for r in rows]
 
 # ======================================================
-# GET SUBJECTS BY DATE (VALID ONLY)
+# 🔥 NEW: GET SEMESTERS
 # ======================================================
+
+@app.get("/semesters")
+def get_semesters(department: str):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT DISTINCT semester
+        FROM students
+        WHERE LOWER(department)=LOWER(%s)
+        ORDER BY semester
+    """, (department,))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [r[0] for r in rows]
+
+# ======================================================
+# 🔥 NEW: GET STUDENTS
+# ======================================================
+
+@app.get("/students")
+def get_students(department: str, semester: str, section: str):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT sbrn, name
+        FROM students
+        WHERE LOWER(department)=LOWER(%s)
+          AND LOWER(semester)=LOWER(%s)
+          AND LOWER(section)=LOWER(%s)
+        ORDER BY sbrn
+    """, (department, semester, section))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [
+        {"sbrn": r[0], "name": r[1]}
+        for r in rows
+    ]
+
+# ======================================================
+# GET SUBJECTS BY DATE
+# ======================================================
+
 @app.get("/subjects-by-date")
 def get_subjects_by_date(
     department: str,
@@ -175,6 +247,7 @@ def get_subjects_by_date(
         JOIN subjects s
           ON t.subject_id = s.subject_id
          AND LOWER(t.semester)=LOWER(s.semester)
+         AND LOWER(t.department)=LOWER(s.department)
         WHERE LOWER(t.department)=LOWER(%s)
           AND LOWER(t.semester)=LOWER(%s)
           AND t.class_date=%s
@@ -192,10 +265,10 @@ def get_subjects_by_date(
         for r in rows
     ]
 
+# ======================================================
+# CHECK ATTENDANCE EXISTS
+# ======================================================
 
-# ======================================================
-# CHECK IF ATTENDANCE EXISTS
-# ======================================================
 @app.get("/attendance-exists")
 def attendance_exists(
     semester: str,
@@ -203,27 +276,28 @@ def attendance_exists(
     subject: str,
     date: str
 ):
+
     conn = connect_db()
     cur = conn.cursor()
 
     cur.execute("""
         SELECT 1 FROM attendance_daily
         WHERE LOWER(semester)=LOWER(%s)
-          AND LOWER(section)=LOWER(%s)
           AND LOWER(subject_id)=LOWER(%s)
           AND class_date=%s
+          AND LOWER(section)=LOWER(%s)
         LIMIT 1
-    """, (semester, section, subject, date))
+    """, (semester, subject, date, section))
 
     exists = cur.fetchone() is not None
     conn.close()
 
     return {"exists": exists}
 
+# ======================================================
+# MARK ATTENDANCE
+# ======================================================
 
-# ======================================================
-# MARK ATTENDANCE (LOCK SAFE)
-# ======================================================
 @app.post("/mark-attendance")
 def mark_attendance(data: AttendanceRequest):
 
@@ -231,44 +305,6 @@ def mark_attendance(data: AttendanceRequest):
     cur = conn.cursor()
 
     try:
-        # Check if already exists
-        cur.execute("""
-            SELECT 1 FROM attendance_daily
-            WHERE subject_id=%s
-              AND semester=%s
-              AND section=%s
-              AND class_date=%s
-            LIMIT 1
-        """, (
-            data.subject,
-            data.semester,
-            data.section,
-            data.date
-        ))
-
-        already = cur.fetchone()
-
-        if already and not data.override:
-            conn.close()
-            return {
-                "status": "already_marked",
-                "message": "Attendance already marked"
-            }
-
-        if already:
-            cur.execute("""
-                DELETE FROM attendance_daily
-                WHERE subject_id=%s
-                  AND semester=%s
-                  AND section=%s
-                  AND class_date=%s
-            """, (
-                data.subject,
-                data.semester,
-                data.section,
-                data.date
-            ))
-
         for rec in data.attendance:
             cur.execute("""
                 INSERT INTO attendance_daily
@@ -296,10 +332,10 @@ def mark_attendance(data: AttendanceRequest):
 
     return {"status": "saved"}
 
+# ======================================================
+# GET ATTENDANCE
+# ======================================================
 
-# ======================================================
-# GET ATTENDANCE FOR DESKTOP SYNC
-# ======================================================
 @app.get("/attendance")
 def get_attendance(
     department: str,
@@ -308,6 +344,7 @@ def get_attendance(
     year: int,
     subject: str
 ):
+
     conn = connect_db()
     cur = conn.cursor()
 
