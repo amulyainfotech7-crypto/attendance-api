@@ -10,6 +10,14 @@ from typing import List
 app = FastAPI()
 
 # ======================================================
+# HEALTH CHECK (Required for Flutter App)
+# ======================================================
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+# ======================================================
 # CORS (Flutter + Web support)
 # ======================================================
 app.add_middleware(
@@ -26,6 +34,7 @@ app.add_middleware(
 def verify_password(password: str, stored_hash: str) -> bool:
     try:
         algo, salt_b64, hash_b64 = stored_hash.split("$")
+
         if algo != "pbkdf2_sha256":
             return False
 
@@ -46,7 +55,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
 
 
 # ======================================================
-# STARTUP – CREATE ALL TABLES
+# STARTUP – CREATE TABLES
 # ======================================================
 @app.on_event("startup")
 def startup():
@@ -54,7 +63,6 @@ def startup():
     conn = connect_db()
     cur = conn.cursor()
 
-    # USERS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users(
             username TEXT PRIMARY KEY,
@@ -64,7 +72,6 @@ def startup():
         )
     """)
 
-    # STUDENTS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS students(
             sbrn TEXT PRIMARY KEY,
@@ -75,18 +82,17 @@ def startup():
         )
     """)
 
-    # SUBJECTS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS subjects(
-            subject_id TEXT PRIMARY KEY,
+            subject_id TEXT,
             subject_name TEXT NOT NULL,
             department TEXT,
             semester TEXT,
-            type TEXT   -- THEORY or PRACTICAL
+            type TEXT,
+            PRIMARY KEY (subject_id, semester)
         )
     """)
 
-    # ATTENDANCE
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_daily(
             sbrn TEXT,
@@ -255,8 +261,6 @@ def mark_attendance(data: AttendanceRequest):
     cur = conn.cursor()
 
     try:
-
-        # Check existing attendance
         cur.execute("""
             SELECT 1 FROM attendance_daily
             WHERE subject_id=%s
@@ -293,12 +297,10 @@ def mark_attendance(data: AttendanceRequest):
                 data.date
             ))
 
-        # Insert records
         for rec in data.attendance:
             cur.execute("""
                 INSERT INTO attendance_daily
-                (sbrn, subject_id, semester, section,
-                 class_date, attended)
+                (sbrn, subject_id, semester, section, class_date, attended)
                 VALUES (%s,%s,%s,%s,%s,%s)
             """, (
                 rec.sbrn,
@@ -319,42 +321,3 @@ def mark_attendance(data: AttendanceRequest):
         conn.close()
 
     return {"status": "saved"}
-
-
-# ======================================================
-# CREATE ADMIN (TEMPORARY)
-# ======================================================
-@app.get("/create-admin")
-def create_admin():
-
-    password = "admin123"
-
-    salt = os.urandom(16)
-
-    hash_bytes = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt,
-        120000
-    )
-
-    stored_password = (
-        "pbkdf2_sha256$"
-        + base64.b64encode(salt).decode()
-        + "$"
-        + base64.b64encode(hash_bytes).decode()
-    )
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO users (username, password, role, active)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (username) DO NOTHING
-    """, ("admin", stored_password, "admin", 1))
-
-    conn.commit()
-    conn.close()
-
-    return {"status": "admin created"}
