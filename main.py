@@ -545,3 +545,57 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
         }
         for r in rows
     ]
+
+# ======================================================
+# 🔥 SYNC STUDENTS (LOCAL → CLOUD)
+# ======================================================
+
+from psycopg2.extras import execute_batch
+from fastapi import Body
+
+@app.post("/sync/students")
+def sync_students(records: list = Body(...)):
+
+    if not records:
+        return {"status": "no_data"}
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    query = """
+    INSERT INTO students
+    (sbrn, name, semester, section, department,
+     course, batch, admission_date, year_semester,
+     academic_status, last_updated, version)
+    VALUES (%(sbrn)s, %(name)s, %(semester)s, %(section)s,
+            %(department)s, %(course)s, %(batch)s,
+            %(admission_date)s, %(year_semester)s,
+            %(academic_status)s,
+            %(last_updated)s, %(version)s)
+    ON CONFLICT (sbrn)
+    DO UPDATE SET
+        name = EXCLUDED.name,
+        semester = EXCLUDED.semester,
+        section = EXCLUDED.section,
+        department = EXCLUDED.department,
+        course = EXCLUDED.course,
+        batch = EXCLUDED.batch,
+        admission_date = EXCLUDED.admission_date,
+        year_semester = EXCLUDED.year_semester,
+        academic_status = EXCLUDED.academic_status,
+        last_updated = EXCLUDED.last_updated,
+        version = EXCLUDED.version
+    WHERE students.version < EXCLUDED.version;
+    """
+
+    try:
+        execute_batch(cur, query, records)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    return {"status": "success", "rows_processed": len(records)}
