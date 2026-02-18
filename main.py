@@ -143,6 +143,20 @@ def startup():
         ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0
     """)
 
+    # --------------------------------------------------
+    # 🔥 SOFT DELETE SUPPORT (ENTERPRISE SAFE)
+    # --------------------------------------------------
+
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0
+    """)
+
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP
+    """)
+
 
     # SUBJECTS
     cur.execute("""
@@ -337,27 +351,33 @@ def sync_timetable(records: list = Body(...)):
 
 
 # ======================================================
-# 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL)
+# 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL SAFE)
 # ======================================================
 
+from fastapi import Query
+from typing import Optional
+
 @app.get("/sync/timetable")
-def get_timetable_sync(since: str = Query(None)):
+def get_timetable_sync(last_sync: Optional[str] = Query(default=None)):
 
     conn = connect_db()
     cur = conn.cursor()
 
     try:
-        if since:
+
+        if last_sync:
+            # 🔒 Safe explicit timestamp casting
             cur.execute("""
                 SELECT department, semester, section, day,
                        period_no, period_len, type,
                        subject_id, faculty_id, room,
                        last_updated, version
                 FROM timetable_slots
-                WHERE last_updated > %s
+                WHERE last_updated > %s::timestamp
                 ORDER BY last_updated ASC
-            """, (since,))
+            """, (last_sync,))
         else:
+            # 🔹 First full sync
             cur.execute("""
                 SELECT department, semester, section, day,
                        period_no, period_len, type,
@@ -387,11 +407,13 @@ def get_timetable_sync(since: str = Query(None)):
             "subject_id": r[7],
             "faculty_id": r[8],
             "room": r[9],
-            "last_updated": r[10],
+            # 🔥 Ensure ISO format string
+            "last_updated": r[10].isoformat() if r[10] else None,
             "version": r[11]
         }
         for r in rows
     ]
+
 
 # ======================================================
 # GET TIMETABLE
@@ -516,11 +538,14 @@ def get_students(department: str, semester: str, section: str):
     ]
 
 # ======================================================
-# 🔥 CLOUD → DESKTOP STUDENT SYNC (INCREMENTAL)
+# 🔥 CLOUD → DESKTOP STUDENT SYNC (INCREMENTAL SAFE)
 # ======================================================
 
+from fastapi import Query
+from typing import Optional
+
 @app.get("/sync/students")
-def get_students_sync(last_sync: str = None):
+def get_students_sync(last_sync: Optional[str] = Query(default=None)):
 
     conn = connect_db()
     cur = conn.cursor()
@@ -528,17 +553,18 @@ def get_students_sync(last_sync: str = None):
     try:
 
         if last_sync:
+            # 🔒 Explicit timestamp casting prevents type mismatch
             cur.execute("""
                 SELECT sbrn, name, semester, section, department,
                        course, batch, admission_date,
                        year_semester, academic_status,
                        last_updated, version
                 FROM students
-                WHERE last_updated > %s
+                WHERE last_updated > %s::timestamp
                 ORDER BY last_updated ASC
             """, (last_sync,))
         else:
-            # First sync → send all
+            # 🔹 First full sync
             cur.execute("""
                 SELECT sbrn, name, semester, section, department,
                        course, batch, admission_date,
@@ -568,12 +594,12 @@ def get_students_sync(last_sync: str = None):
             "admission_date": r[7],
             "year_semester": r[8],
             "academic_status": r[9],
-            "last_updated": r[10],
+            # 🔥 ISO format for JSON safety
+            "last_updated": r[10].isoformat() if r[10] else None,
             "version": r[11]
         }
         for r in rows
     ]
-
 
 
 # ======================================================
@@ -680,11 +706,11 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
     ]
 
 # ======================================================
-# 🔥 SYNC STUDENTS (LOCAL → CLOUD)
+# 🔥 SYNC STUDENTS (LOCAL → CLOUD) — ENTERPRISE SAFE
 # ======================================================
 
 from psycopg2.extras import execute_batch
-from fastapi import Body
+from fastapi import Body, HTTPException
 
 @app.post("/sync/students")
 def sync_students(records: list = Body(...)):
@@ -697,14 +723,39 @@ def sync_students(records: list = Body(...)):
 
     query = """
     INSERT INTO students
-    (sbrn, name, semester, section, department,
-     course, batch, admission_date, year_semester,
-     academic_status, last_updated, version)
-    VALUES (%(sbrn)s, %(name)s, %(semester)s, %(section)s,
-            %(department)s, %(course)s, %(batch)s,
-            %(admission_date)s, %(year_semester)s,
-            %(academic_status)s,
-            %(last_updated)s, %(version)s)
+    (
+        sbrn,
+        name,
+        semester,
+        section,
+        department,
+        course,
+        batch,
+        admission_date,
+        year_semester,
+        academic_status,
+        last_updated,
+        version,
+        is_deleted,
+        deleted_at
+    )
+    VALUES
+    (
+        %(sbrn)s,
+        %(name)s,
+        %(semester)s,
+        %(section)s,
+        %(department)s,
+        %(course)s,
+        %(batch)s,
+        %(admission_date)s,
+        %(year_semester)s,
+        %(academic_status)s,
+        %(last_updated)s,
+        %(version)s,
+        %(is_deleted)s,
+        %(deleted_at)s
+    )
     ON CONFLICT (sbrn)
     DO UPDATE SET
         name = EXCLUDED.name,
@@ -717,13 +768,16 @@ def sync_students(records: list = Body(...)):
         year_semester = EXCLUDED.year_semester,
         academic_status = EXCLUDED.academic_status,
         last_updated = EXCLUDED.last_updated,
-        version = EXCLUDED.version
+        version = EXCLUDED.version,
+        is_deleted = EXCLUDED.is_deleted,
+        deleted_at = EXCLUDED.deleted_at
     WHERE students.version < EXCLUDED.version;
     """
 
     try:
         execute_batch(cur, query, records)
         conn.commit()
+
     except Exception as e:
         conn.rollback()
         conn.close()
@@ -731,38 +785,84 @@ def sync_students(records: list = Body(...)):
 
     conn.close()
 
-    return {"status": "success", "rows_processed": len(records)}
+    return {
+        "status": "success",
+        "rows_processed": len(records)
+    }
+
 
 # ======================================================
-# 🔥 INCREMENTAL STUDENT SYNC (CLOUD → DESKTOP)
+# 🔥 INCREMENTAL STUDENT SYNC (CLOUD → DESKTOP SAFE)
 # ======================================================
+
+from fastapi import Query, HTTPException
+from typing import Optional
 
 @app.get("/sync/students")
-def sync_students_from_cloud(since: str | None = None):
+def sync_students_from_cloud(
+    since: Optional[str] = Query(default=None)
+):
 
     conn = connect_db()
     cur = conn.cursor()
 
-    if since:
-        cur.execute("""
-            SELECT sbrn, name, semester, section, department,
-                   course, batch, admission_date,
-                   year_semester, academic_status,
-                   last_updated, version
-            FROM students
-            WHERE last_updated > %s
-        """, (since,))
-    else:
-        cur.execute("""
-            SELECT sbrn, name, semester, section, department,
-                   course, batch, admission_date,
-                   year_semester, academic_status,
-                   last_updated, version
-            FROM students
-        """)
+    try:
 
-    rows = cur.fetchall()
+        if since:
+            # 🔒 Explicit timestamp casting prevents type mismatch
+            cur.execute("""
+                SELECT
+                    sbrn,
+                    name,
+                    semester,
+                    section,
+                    department,
+                    course,
+                    batch,
+                    admission_date,
+                    year_semester,
+                    academic_status,
+                    last_updated,
+                    version,
+                    is_deleted,
+                    deleted_at
+                FROM students
+                WHERE last_updated > %s::timestamp
+                ORDER BY last_updated ASC
+            """, (since,))
+        else:
+            # 🔹 First full sync
+            cur.execute("""
+                SELECT
+                    sbrn,
+                    name,
+                    semester,
+                    section,
+                    department,
+                    course,
+                    batch,
+                    admission_date,
+                    year_semester,
+                    academic_status,
+                    last_updated,
+                    version,
+                    is_deleted,
+                    deleted_at
+                FROM students
+                ORDER BY last_updated ASC
+            """)
+
+        rows = cur.fetchall()
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
     conn.close()
+
+    # -----------------------------------------------------
+    # 🔥 JSON SAFE RESPONSE
+    # -----------------------------------------------------
 
     return [
         {
@@ -776,8 +876,14 @@ def sync_students_from_cloud(since: str | None = None):
             "admission_date": r[7],
             "year_semester": r[8],
             "academic_status": r[9],
-            "last_updated": r[10],
-            "version": r[11]
+
+            # 🔥 ISO conversion for datetime safety
+            "last_updated": r[10].isoformat() if r[10] else None,
+            "version": r[11],
+
+            # 🔥 Soft delete support
+            "is_deleted": r[12],
+            "deleted_at": r[13].isoformat() if r[13] else None,
         }
         for r in rows
     ]
