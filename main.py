@@ -279,6 +279,46 @@ def sync_timetable(records: list = Body(...)):
 
     return {"status": "success", "rows_processed": len(records)}
 
+
+# ======================================================
+# 🔥 CLOUD → DESKTOP TIMETABLE SYNC
+# ======================================================
+
+@app.get("/sync/timetable")
+def get_timetable_sync():
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT department, semester, section, day,
+               period_no, period_len, type,
+               subject_id, faculty_id, room,
+               last_updated, version
+        FROM timetable_slots
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [
+        {
+            "department": r[0],
+            "semester": r[1],
+            "section": r[2],
+            "day": r[3],
+            "period_no": r[4],
+            "period_len": r[5],
+            "type": r[6],
+            "subject_id": r[7],
+            "faculty_id": r[8],
+            "room": r[9],
+            "last_updated": r[10],
+            "version": r[11]
+        }
+        for r in rows
+    ]
+
 # ======================================================
 # GET TIMETABLE
 # ======================================================
