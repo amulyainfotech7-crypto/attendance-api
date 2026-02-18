@@ -101,40 +101,41 @@ def startup():
         )
     """)
 
-    # 🔥 TIMETABLE (SYNC READY)
+    # 🔥 TIMETABLE (FULL SYNC READY)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS timetable_slots(
             id SERIAL PRIMARY KEY,
-            department TEXT,
-            semester TEXT,
-            section TEXT,
-            day TEXT,
-            period_no INTEGER,
+            department TEXT NOT NULL,
+            semester TEXT NOT NULL,
+            section TEXT NOT NULL,
+            day TEXT NOT NULL,
+            period_no INTEGER NOT NULL,
             period_len INTEGER,
             type TEXT,
             subject_id TEXT,
             faculty_id TEXT,
             room TEXT,
             last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            version INTEGER DEFAULT 1
+            version INTEGER DEFAULT 1,
+            sync_pending INTEGER DEFAULT 0
         )
     """)
 
-    # Ensure UNIQUE constraint (safe execution)
+    # 🔒 Ensure UNIQUE constraint (safe execution)
     cur.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'unique_tt_slot'
-            ) THEN
-                ALTER TABLE timetable_slots
-                ADD CONSTRAINT unique_tt_slot
-                UNIQUE (department, semester, section, day, period_no);
-            END IF;
-        END
-        $$;
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'timetable_unique_slot'
+        ) THEN
+            ALTER TABLE timetable_slots
+            ADD CONSTRAINT timetable_unique_slot
+            UNIQUE (department, semester, section, day, period_no);
+        END IF;
+    END$$;
     """)
+
 
     # ATTENDANCE
     cur.execute("""
