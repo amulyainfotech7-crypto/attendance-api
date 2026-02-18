@@ -78,16 +78,71 @@ def startup():
         )
     """)
 
-    # STUDENTS
+    # ======================================================
+    # STUDENTS (FULL SYNC READY)
+    # ======================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS students(
             sbrn TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
+            name TEXT,
             department TEXT,
             semester TEXT,
-            section TEXT
+            section TEXT,
+            course TEXT,
+            batch TEXT,
+            admission_date TEXT,
+            year_semester TEXT,
+            academic_status TEXT DEFAULT 'REGULAR',
+
+            -- 🔥 SYNC ENGINE
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            version INTEGER DEFAULT 1,
+            sync_pending INTEGER DEFAULT 0
         )
     """)
+
+    # 🔒 Safe column repair (for old DBs)
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS course TEXT
+    """)
+
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS batch TEXT
+    """)
+
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS admission_date TEXT
+    """)
+
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS year_semester TEXT
+    """)
+
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS academic_status TEXT DEFAULT 'REGULAR'
+    """)
+
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    """)
+
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1
+    """)
+
+    cur.execute("""
+        ALTER TABLE students
+        ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0
+    """)
+
 
     # SUBJECTS
     cur.execute("""
