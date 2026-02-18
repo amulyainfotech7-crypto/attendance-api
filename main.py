@@ -718,6 +718,29 @@ def sync_students(records: list = Body(...)):
     if not records:
         return {"status": "no_data"}
 
+    # 🔥 Normalize records (prevent KeyError)
+    normalized = []
+
+    for r in records:
+        normalized.append({
+            "sbrn": r.get("sbrn"),
+            "name": r.get("name"),
+            "semester": r.get("semester"),
+            "section": r.get("section"),
+            "department": r.get("department"),
+            "course": r.get("course"),
+            "batch": r.get("batch"),
+            "admission_date": r.get("admission_date"),
+            "year_semester": r.get("year_semester"),
+            "academic_status": r.get("academic_status", "REGULAR"),
+            "last_updated": r.get("last_updated"),
+            "version": r.get("version", 1),
+
+            # 🔥 Safe defaults
+            "is_deleted": r.get("is_deleted", 0),
+            "deleted_at": r.get("deleted_at"),
+        })
+
     conn = connect_db()
     cur = conn.cursor()
 
@@ -775,7 +798,7 @@ def sync_students(records: list = Body(...)):
     """
 
     try:
-        execute_batch(cur, query, records)
+        execute_batch(cur, query, normalized)
         conn.commit()
 
     except Exception as e:
@@ -787,7 +810,7 @@ def sync_students(records: list = Body(...)):
 
     return {
         "status": "success",
-        "rows_processed": len(records)
+        "rows_processed": len(normalized)
     }
 
 
