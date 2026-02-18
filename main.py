@@ -497,6 +497,44 @@ def get_students(department: str, semester: str, section: str):
         for r in rows
     ]
 
+# ======================================================
+# 🔥 CLOUD → DESKTOP STUDENT SYNC
+# ======================================================
+
+@app.get("/sync/students")
+def get_students_sync():
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT sbrn, name, semester, section, department,
+               course, batch, admission_date,
+               year_semester, academic_status,
+               last_updated, version
+        FROM students
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [
+        {
+            "sbrn": r[0],
+            "name": r[1],
+            "semester": r[2],
+            "section": r[3],
+            "department": r[4],
+            "course": r[5],
+            "batch": r[6],
+            "admission_date": r[7],
+            "year_semester": r[8],
+            "academic_status": r[9],
+            "last_updated": r[10],
+            "version": r[11]
+        }
+        for r in rows
+    ]
 
 # ======================================================
 # CHECK ATTENDANCE EXISTS
