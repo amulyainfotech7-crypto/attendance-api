@@ -400,7 +400,7 @@ def get_subjects_by_date(department: str, semester: str, date: str):
     ]
 
 # ======================================================
-# GET STUDENTS
+# GET STUDENTS (SYNC SAFE VERSION)
 # ======================================================
 
 @app.get("/students")
@@ -409,19 +409,39 @@ def get_students(department: str, semester: str, section: str):
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT sbrn, name
-        FROM students
-        WHERE LOWER(department)=LOWER(%s)
-          AND LOWER(semester)=LOWER(%s)
-          AND LOWER(section)=LOWER(%s)
-        ORDER BY sbrn
-    """, (department, semester, section))
+    try:
+        cur.execute("""
+            SELECT sbrn,
+                   name,
+                   department,
+                   semester,
+                   section
+            FROM students
+            WHERE LOWER(COALESCE(department,'')) = LOWER(%s)
+              AND LOWER(COALESCE(semester,''))   = LOWER(%s)
+              AND LOWER(COALESCE(section,''))    = LOWER(%s)
+            ORDER BY sbrn
+        """, (department, semester, section))
 
-    rows = cur.fetchall()
+        rows = cur.fetchall()
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
     conn.close()
 
-    return [{"sbrn": r[0], "name": r[1]} for r in rows]
+    return [
+        {
+            "sbrn": r[0],
+            "name": r[1],
+            "department": r[2],
+            "semester": r[3],
+            "section": r[4]
+        }
+        for r in rows
+    ]
+
 
 # ======================================================
 # CHECK ATTENDANCE EXISTS
