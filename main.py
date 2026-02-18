@@ -1,7 +1,9 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from database import connect_db
 from models import LoginModel, AttendanceRequest
+from psycopg2.extras import execute_batch
 import hashlib
 import base64
 from datetime import datetime
@@ -9,8 +11,10 @@ from datetime import datetime
 app = FastAPI()
 
 # ======================================================
-# CORS
+# MIDDLEWARE
 # ======================================================
+
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,9 +68,7 @@ def startup():
     conn = connect_db()
     cur = conn.cursor()
 
-    # ======================================================
-    # USERS TABLE
-    # ======================================================
+    # USERS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users(
             username TEXT PRIMARY KEY,
@@ -76,9 +78,7 @@ def startup():
         )
     """)
 
-    # ======================================================
-    # STUDENTS TABLE
-    # ======================================================
+    # STUDENTS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS students(
             sbrn TEXT PRIMARY KEY,
@@ -89,9 +89,7 @@ def startup():
         )
     """)
 
-    # ======================================================
-    # SUBJECTS TABLE
-    # ======================================================
+    # SUBJECTS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS subjects(
             subject_id TEXT,
@@ -103,9 +101,7 @@ def startup():
         )
     """)
 
-    # ======================================================
-    # ✅ CORRECT TIMETABLE_SLOTS TABLE (POSTGRESQL)
-    # ======================================================
+    # 🔥 UPDATED TIMETABLE (SYNC READY)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS timetable_slots(
             id SERIAL PRIMARY KEY,
@@ -118,13 +114,29 @@ def startup():
             type TEXT,
             subject_id TEXT,
             faculty_id TEXT,
-            room TEXT
+            room TEXT,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            version INTEGER DEFAULT 1
         )
     """)
 
-    # ======================================================
-    # ATTENDANCE TABLE
-    # ======================================================
+    # Ensure unique constraint for UPSERT
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'unique_tt_slot'
+            ) THEN
+                ALTER TABLE timetable_slots
+                ADD CONSTRAINT unique_tt_slot
+                UNIQUE (department, semester, section, day, period_no);
+            END IF;
+        END
+        $$;
+    """)
+
+    # ATTENDANCE
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_daily(
             sbrn TEXT,
@@ -140,8 +152,7 @@ def startup():
     conn.commit()
     conn.close()
 
-    print("✅ PostgreSQL Server Ready")
-
+    print("✅ PostgreSQL Server Ready (SYNC ENABLED)")
 
 # ======================================================
 # LOGIN
@@ -178,249 +189,81 @@ def login(data: LoginModel):
     }
 
 # ======================================================
-# 🔥 NEW: GET DEPARTMENTS
+# 🔥 TIMETABLE SYNC (LOCAL → CLOUD)
 # ======================================================
 
-@app.get("/departments")
-def get_departments():
+@app.post("/sync/timetable")
+def sync_timetable(records: list = Body(...)):
+
+    if not records:
+        return {"status": "no_data"}
 
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT DISTINCT department
-        FROM students
-        WHERE department IS NOT NULL
-        ORDER BY department
-    """)
-
-    rows = cur.fetchall()
-    conn.close()
-
-    return [r[0] for r in rows]
-
-# ======================================================
-# 🔥 NEW: GET SEMESTERS
-# ======================================================
-
-@app.get("/semesters")
-def get_semesters(department: str):
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT DISTINCT semester
-        FROM students
-        WHERE LOWER(department)=LOWER(%s)
-        ORDER BY semester
-    """, (department,))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    return [r[0] for r in rows]
-
-
-# ======================================================
-# GET SUBJECTS BY DATE (HYBRID SAFE VERSION)
-# ======================================================
-
-from datetime import datetime
-from fastapi import HTTPException
-
-@app.get("/subjects-by-date")
-def get_subjects_by_date(
-    department: str,
-    semester: str,
-    date: str
-):
+    query = """
+    INSERT INTO timetable_slots
+    (department, semester, section, day, period_no,
+     period_len, type, subject_id, faculty_id, room,
+     last_updated, version)
+    VALUES (%(department)s, %(semester)s, %(section)s,
+            %(day)s, %(period_no)s,
+            %(period_len)s, %(type)s,
+            %(subject_id)s, %(faculty_id)s, %(room)s,
+            %(last_updated)s, %(version)s)
+    ON CONFLICT (department, semester, section, day, period_no)
+    DO UPDATE SET
+        period_len = EXCLUDED.period_len,
+        type = EXCLUDED.type,
+        subject_id = EXCLUDED.subject_id,
+        faculty_id = EXCLUDED.faculty_id,
+        room = EXCLUDED.room,
+        last_updated = EXCLUDED.last_updated,
+        version = EXCLUDED.version
+    WHERE timetable_slots.version < EXCLUDED.version;
+    """
 
     try:
-        parsed_date = datetime.strptime(date, "%Y-%m-%d")
-        weekday_name = parsed_date.strftime("%A")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format")
-
-    conn = connect_db()   # 👈 This decides LOCAL or CLOUD
-    cur = conn.cursor()
-
-    try:
-        cur.execute("""
-            SELECT
-                s.subject_id,
-                s.subject_name,
-                s.type,
-                MIN(t.period_no) as first_period
-            FROM timetable_slots t
-            JOIN subjects s
-              ON t.subject_id = s.subject_id
-             AND LOWER(t.semester)=LOWER(s.semester)
-             AND LOWER(t.department)=LOWER(s.department)
-            WHERE LOWER(t.department)=LOWER(%s)
-              AND LOWER(t.semester)=LOWER(%s)
-              AND LOWER(t.day)=LOWER(%s)
-            GROUP BY s.subject_id, s.subject_name, s.type
-            ORDER BY first_period
-        """, (department, semester, weekday_name))
-
-        rows = cur.fetchall()
-
-    except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=500, detail=str(e))
-
-    conn.close()
-
-    return [
-        {
-            "subject_id": r[0],
-            "subject_name": r[1],
-            "type": r[2]
-        }
-        for r in rows
-    ]
-
-
-
-
-# ======================================================
-# 🔥 NEW: GET STUDENTS
-# ======================================================
-
-@app.get("/students")
-def get_students(department: str, semester: str, section: str):
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT sbrn, name
-        FROM students
-        WHERE LOWER(department)=LOWER(%s)
-          AND LOWER(semester)=LOWER(%s)
-          AND LOWER(section)=LOWER(%s)
-        ORDER BY sbrn
-    """, (department, semester, section))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    return [
-        {"sbrn": r[0], "name": r[1]}
-        for r in rows
-    ]
-
-# ======================================================
-# CHECK ATTENDANCE EXISTS
-# ======================================================
-
-@app.get("/attendance-exists")
-def attendance_exists(
-    semester: str,
-    section: str,
-    subject: str,
-    date: str
-):
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT 1 FROM attendance_daily
-        WHERE LOWER(semester)=LOWER(%s)
-          AND LOWER(subject_id)=LOWER(%s)
-          AND class_date=%s
-          AND LOWER(section)=LOWER(%s)
-        LIMIT 1
-    """, (semester, subject, date, section))
-
-    exists = cur.fetchone() is not None
-    conn.close()
-
-    return {"exists": exists}
-
-# ======================================================
-# MARK ATTENDANCE
-# ======================================================
-
-@app.post("/mark-attendance")
-def mark_attendance(data: AttendanceRequest):
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    try:
-        for rec in data.attendance:
-            cur.execute("""
-                INSERT INTO attendance_daily
-                (sbrn, subject_id, semester, section, class_date, attended)
-                VALUES (%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (sbrn, subject_id, class_date, section)
-                DO UPDATE SET attended=EXCLUDED.attended
-            """, (
-                rec.sbrn,
-                data.subject,
-                data.semester,
-                data.section,
-                data.date,
-                1 if rec.present else 0
-            ))
-
+        execute_batch(cur, query, records)
         conn.commit()
-
     except Exception as e:
         conn.rollback()
+        conn.close()
         raise HTTPException(status_code=500, detail=str(e))
 
-    finally:
-        conn.close()
+    conn.close()
 
-    return {"status": "saved"}
+    return {"status": "success", "rows_processed": len(records)}
 
 # ======================================================
-# GET ATTENDANCE
+# 🔥 GET TIMETABLE (FOR FLUTTER)
 # ======================================================
 
-@app.get("/attendance")
-def get_attendance(
-    department: str,
-    semester: str,
-    month: int,
-    year: int,
-    subject: str
-):
+@app.get("/timetable")
+def get_timetable(department: str, semester: str, day: str):
 
     conn = connect_db()
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT a.sbrn,
-               a.subject_id,
-               a.semester,
-               a.section,
-               a.class_date,
-               a.attended
-        FROM attendance_daily a
-        JOIN students s ON a.sbrn = s.sbrn
-        WHERE LOWER(s.department)=LOWER(%s)
-          AND LOWER(a.semester)=LOWER(%s)
-          AND EXTRACT(MONTH FROM a.class_date)=%s
-          AND EXTRACT(YEAR FROM a.class_date)=%s
-          AND LOWER(a.subject_id)=LOWER(%s)
-    """, (department, semester, month, year, subject))
+        SELECT section, period_no, subject_id, faculty_id, room
+        FROM timetable_slots
+        WHERE LOWER(department)=LOWER(%s)
+          AND LOWER(semester)=LOWER(%s)
+          AND LOWER(day)=LOWER(%s)
+        ORDER BY period_no
+    """, (department, semester, day))
 
     rows = cur.fetchall()
     conn.close()
 
     return [
         {
-            "sbrn": r[0],
-            "subject_id": r[1],
-            "semester": r[2],
-            "section": r[3],
-            "class_date": r[4].strftime("%Y-%m-%d"),
-            "attended": r[5]
+            "section": r[0],
+            "period_no": r[1],
+            "subject_id": r[2],
+            "faculty_id": r[3],
+            "room": r[4]
         }
         for r in rows
     ]
