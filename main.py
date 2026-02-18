@@ -223,10 +223,11 @@ def get_semesters(department: str):
 
 
 # ======================================================
-# GET SUBJECTS BY DATE
+# GET SUBJECTS BY DATE (HYBRID SAFE VERSION)
 # ======================================================
 
 from datetime import datetime
+from fastapi import HTTPException
 
 @app.get("/subjects-by-date")
 def get_subjects_by_date(
@@ -241,12 +242,16 @@ def get_subjects_by_date(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format")
 
-    conn = connect_db()
+    conn = connect_db()   # 👈 This decides LOCAL or CLOUD
     cur = conn.cursor()
 
     try:
         cur.execute("""
-            SELECT DISTINCT s.subject_id, s.subject_name, s.type
+            SELECT
+                s.subject_id,
+                s.subject_name,
+                s.type,
+                MIN(t.period_no) as first_period
             FROM timetable_slots t
             JOIN subjects s
               ON t.subject_id = s.subject_id
@@ -255,7 +260,8 @@ def get_subjects_by_date(
             WHERE LOWER(t.department)=LOWER(%s)
               AND LOWER(t.semester)=LOWER(%s)
               AND LOWER(t.day)=LOWER(%s)
-            ORDER BY t.period_no
+            GROUP BY s.subject_id, s.subject_name, s.type
+            ORDER BY first_period
         """, (department, semester, weekday_name))
 
         rows = cur.fetchall()
@@ -274,6 +280,7 @@ def get_subjects_by_date(
         }
         for r in rows
     ]
+
 
 
 
