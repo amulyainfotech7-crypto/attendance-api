@@ -337,24 +337,42 @@ def sync_timetable(records: list = Body(...)):
 
 
 # ======================================================
-# 🔥 CLOUD → DESKTOP TIMETABLE SYNC
+# 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL)
 # ======================================================
 
 @app.get("/sync/timetable")
-def get_timetable_sync():
+def get_timetable_sync(since: str = Query(None)):
 
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT department, semester, section, day,
-               period_no, period_len, type,
-               subject_id, faculty_id, room,
-               last_updated, version
-        FROM timetable_slots
-    """)
+    try:
+        if since:
+            cur.execute("""
+                SELECT department, semester, section, day,
+                       period_no, period_len, type,
+                       subject_id, faculty_id, room,
+                       last_updated, version
+                FROM timetable_slots
+                WHERE last_updated > %s
+                ORDER BY last_updated ASC
+            """, (since,))
+        else:
+            cur.execute("""
+                SELECT department, semester, section, day,
+                       period_no, period_len, type,
+                       subject_id, faculty_id, room,
+                       last_updated, version
+                FROM timetable_slots
+                ORDER BY last_updated ASC
+            """)
 
-    rows = cur.fetchall()
+        rows = cur.fetchall()
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
     conn.close()
 
     return [
@@ -498,24 +516,44 @@ def get_students(department: str, semester: str, section: str):
     ]
 
 # ======================================================
-# 🔥 CLOUD → DESKTOP STUDENT SYNC
+# 🔥 CLOUD → DESKTOP STUDENT SYNC (INCREMENTAL)
 # ======================================================
 
 @app.get("/sync/students")
-def get_students_sync():
+def get_students_sync(last_sync: str = None):
 
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT sbrn, name, semester, section, department,
-               course, batch, admission_date,
-               year_semester, academic_status,
-               last_updated, version
-        FROM students
-    """)
+    try:
 
-    rows = cur.fetchall()
+        if last_sync:
+            cur.execute("""
+                SELECT sbrn, name, semester, section, department,
+                       course, batch, admission_date,
+                       year_semester, academic_status,
+                       last_updated, version
+                FROM students
+                WHERE last_updated > %s
+                ORDER BY last_updated ASC
+            """, (last_sync,))
+        else:
+            # First sync → send all
+            cur.execute("""
+                SELECT sbrn, name, semester, section, department,
+                       course, batch, admission_date,
+                       year_semester, academic_status,
+                       last_updated, version
+                FROM students
+                ORDER BY last_updated ASC
+            """)
+
+        rows = cur.fetchall()
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
     conn.close()
 
     return [
@@ -535,6 +573,8 @@ def get_students_sync():
         }
         for r in rows
     ]
+
+
 
 # ======================================================
 # CHECK ATTENDANCE EXISTS
@@ -692,3 +732,52 @@ def sync_students(records: list = Body(...)):
     conn.close()
 
     return {"status": "success", "rows_processed": len(records)}
+
+# ======================================================
+# 🔥 INCREMENTAL STUDENT SYNC (CLOUD → DESKTOP)
+# ======================================================
+
+@app.get("/sync/students")
+def sync_students_from_cloud(since: str | None = None):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    if since:
+        cur.execute("""
+            SELECT sbrn, name, semester, section, department,
+                   course, batch, admission_date,
+                   year_semester, academic_status,
+                   last_updated, version
+            FROM students
+            WHERE last_updated > %s
+        """, (since,))
+    else:
+        cur.execute("""
+            SELECT sbrn, name, semester, section, department,
+                   course, batch, admission_date,
+                   year_semester, academic_status,
+                   last_updated, version
+            FROM students
+        """)
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return [
+        {
+            "sbrn": r[0],
+            "name": r[1],
+            "semester": r[2],
+            "section": r[3],
+            "department": r[4],
+            "course": r[5],
+            "batch": r[6],
+            "admission_date": r[7],
+            "year_semester": r[8],
+            "academic_status": r[9],
+            "last_updated": r[10],
+            "version": r[11]
+        }
+        for r in rows
+    ]
