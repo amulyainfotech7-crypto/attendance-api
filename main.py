@@ -665,6 +665,40 @@ def mark_attendance(data: AttendanceRequest):
     cur = conn.cursor()
 
     try:
+        # ======================================================
+        # 🔥 CHECK IF PERIOD EXISTS (CRITICAL)
+        # ======================================================
+        class_date = datetime.strptime(data.date, "%Y-%m-%d")
+        day_short = class_date.strftime("%a")
+
+        cur.execute("""
+            SELECT 1
+            FROM timetable_slots
+            WHERE LOWER(department)=LOWER(%s)
+              AND LOWER(semester)=LOWER(%s)
+              AND LOWER(section)=LOWER(%s)
+              AND LOWER(subject_id)=LOWER(%s)
+              AND LOWER(day)=LOWER(%s)
+            LIMIT 1
+        """, (
+            data.department,
+            data.semester,
+            data.section,
+            data.subject,
+            day_short
+        ))
+
+        period_exists = cur.fetchone()
+
+        if not period_exists:
+            return {
+                "status": "no_period",
+                "message": "No period today"
+            }
+
+        # ======================================================
+        # 🔥 SAVE ATTENDANCE
+        # ======================================================
         for rec in data.attendance:
             cur.execute("""
                 INSERT INTO attendance_daily
@@ -691,6 +725,7 @@ def mark_attendance(data: AttendanceRequest):
         conn.close()
 
     return {"status": "saved"}
+
 
 # ======================================================
 # GET ATTENDANCE
