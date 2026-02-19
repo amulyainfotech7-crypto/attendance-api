@@ -190,20 +190,23 @@ def startup():
         )
     """)
 
-    # 🔒 Ensure UNIQUE constraint (safe execution)
+    # ======================================================
+    # 🔥 AUTO-HEAL SUBJECTS TABLE (PERMANENT FIX)
+    # ======================================================
+
     cur.execute("""
-    DO $$
-    BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint
-            WHERE conname = 'timetable_unique_slot'
-        ) THEN
-            ALTER TABLE timetable_slots
-            ADD CONSTRAINT timetable_unique_slot
-            UNIQUE (department, semester, section, day, period_no);
-        END IF;
-    END$$;
+        INSERT INTO subjects (subject_id, subject_name, department, semester, type)
+        SELECT DISTINCT
+            subject_id,
+            subject_id,
+            department,
+            semester,
+            type
+        FROM timetable_slots
+        WHERE subject_id IS NOT NULL
+        ON CONFLICT DO NOTHING;
     """)
+
 
 
     # ATTENDANCE
@@ -338,8 +341,27 @@ def sync_timetable(records: list = Body(...)):
     """
 
     try:
+        # 🔹 Main timetable sync
         execute_batch(cur, query, records)
         conn.commit()
+
+        # ======================================================
+        # 🔥 AUTO-HEAL SUBJECTS AFTER TIMETABLE SYNC (PERMANENT)
+        # ======================================================
+        cur.execute("""
+            INSERT INTO subjects (subject_id, subject_name, department, semester, type)
+            SELECT DISTINCT
+                subject_id,
+                subject_id,
+                department,
+                semester,
+                type
+            FROM timetable_slots
+            WHERE subject_id IS NOT NULL
+            ON CONFLICT DO NOTHING;
+        """)
+        conn.commit()
+
     except Exception as e:
         conn.rollback()
         conn.close()
@@ -348,6 +370,7 @@ def sync_timetable(records: list = Body(...)):
     conn.close()
 
     return {"status": "success", "rows_processed": len(records)}
+
 
 
 # ======================================================
@@ -457,12 +480,8 @@ def get_subjects_by_date(department: str, semester: str, date: str):
 
     try:
         parsed_date = datetime.strptime(date, "%Y-%m-%d")
-
-        # ✅ short day name (Mon, Tue...)
         weekday_short = parsed_date.strftime("%a").strip()
-
         print("DEBUG weekday:", weekday_short)
-
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format")
 
@@ -470,19 +489,22 @@ def get_subjects_by_date(department: str, semester: str, date: str):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT DISTINCT
+        SELECT
             t.subject_id,
-            t.subject_id AS subject_name,
-            t.type,
+            COALESCE(s.subject_name, t.subject_id) AS subject_name,
+            COALESCE(s.type, t.type) AS type,
             MIN(t.period_no) AS first_period
         FROM timetable_slots t
+        LEFT JOIN subjects s
+          ON LOWER(TRIM(t.subject_id)) = LOWER(TRIM(s.subject_id))
+         AND LOWER(TRIM(t.semester))   = LOWER(TRIM(s.semester))
+         AND LOWER(TRIM(t.department)) = LOWER(TRIM(s.department))
         WHERE LOWER(TRIM(t.department)) = LOWER(TRIM(%s))
-        AND LOWER(TRIM(t.semester))   = LOWER(TRIM(%s))
-        AND LOWER(TRIM(t.day))        = LOWER(TRIM(%s))
-        GROUP BY t.subject_id, t.type
+          AND LOWER(TRIM(t.semester))   = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.day))        = LOWER(TRIM(%s))
+        GROUP BY t.subject_id, s.subject_name, s.type, t.type
         ORDER BY first_period
     """, (department, semester, weekday_short))
-
 
     rows = cur.fetchall()
     conn.close()
@@ -497,6 +519,7 @@ def get_subjects_by_date(department: str, semester: str, date: str):
         }
         for r in rows
     ]
+
 
 
 # ======================================================
