@@ -458,7 +458,7 @@ def get_subjects_by_date(department: str, semester: str, date: str):
     try:
         parsed_date = datetime.strptime(date, "%Y-%m-%d")
 
-        # ✅ IMPORTANT: use short day name (Mon, Tue...)
+        # ✅ short day name (Mon, Tue...)
         weekday_short = parsed_date.strftime("%a").strip()
 
         print("DEBUG weekday:", weekday_short)
@@ -471,19 +471,19 @@ def get_subjects_by_date(department: str, semester: str, date: str):
 
     cur.execute("""
         SELECT
-            s.subject_id,
-            s.subject_name,
-            s.type,
+            t.subject_id,
+            COALESCE(s.subject_name, t.subject_id) AS subject_name,
+            COALESCE(s.type, t.type) AS type,
             MIN(t.period_no) as first_period
         FROM timetable_slots t
-        JOIN subjects s
+        LEFT JOIN subjects s
           ON LOWER(TRIM(t.subject_id)) = LOWER(TRIM(s.subject_id))
          AND LOWER(TRIM(t.semester))   = LOWER(TRIM(s.semester))
          AND LOWER(TRIM(t.department)) = LOWER(TRIM(s.department))
         WHERE LOWER(TRIM(t.department)) = LOWER(TRIM(%s))
           AND LOWER(TRIM(t.semester))   = LOWER(TRIM(%s))
           AND LOWER(TRIM(t.day))        = LOWER(TRIM(%s))
-        GROUP BY s.subject_id, s.subject_name, s.type
+        GROUP BY t.subject_id, s.subject_name, s.type, t.type
         ORDER BY first_period
     """, (department, semester, weekday_short))
 
