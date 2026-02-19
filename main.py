@@ -533,18 +533,41 @@ def get_students(department: str, semester: str, section: str):
     cur = conn.cursor()
 
     try:
-        cur.execute("""
-            SELECT sbrn,
-                   name,
-                   department,
-                   semester,
-                   section
-            FROM students
-            WHERE LOWER(COALESCE(department,'')) = LOWER(%s)
-              AND LOWER(COALESCE(semester,''))   = LOWER(%s)
-              AND LOWER(COALESCE(section,''))    = LOWER(%s)
-            ORDER BY sbrn
-        """, (department, semester, section))
+
+        # ======================================================
+        # 🔥 THEORY CASE → section = all → ignore section filter
+        # ======================================================
+        if section.lower() == "all":
+
+            cur.execute("""
+                SELECT sbrn,
+                       name,
+                       department,
+                       semester,
+                       section
+                FROM students
+                WHERE LOWER(COALESCE(department,'')) = LOWER(%s)
+                  AND LOWER(COALESCE(semester,''))   = LOWER(%s)
+                ORDER BY sbrn
+            """, (department, semester))
+
+        # ======================================================
+        # 🔥 PRACTICAL CASE → filter by section
+        # ======================================================
+        else:
+
+            cur.execute("""
+                SELECT sbrn,
+                       name,
+                       department,
+                       semester,
+                       section
+                FROM students
+                WHERE LOWER(COALESCE(department,'')) = LOWER(%s)
+                  AND LOWER(COALESCE(semester,''))   = LOWER(%s)
+                  AND LOWER(COALESCE(section,''))    = LOWER(%s)
+                ORDER BY sbrn
+            """, (department, semester, section))
 
         rows = cur.fetchall()
 
@@ -564,6 +587,7 @@ def get_students(department: str, semester: str, section: str):
         }
         for r in rows
     ]
+
 
 # ======================================================
 # 🔥 CLOUD → DESKTOP STUDENT SYNC (INCREMENTAL SAFE)
@@ -666,27 +690,51 @@ def mark_attendance(data: AttendanceRequest):
 
     try:
         # ======================================================
-        # 🔥 CHECK IF PERIOD EXISTS (CRITICAL)
+        # 🔥 CHECK IF PERIOD EXISTS
         # ======================================================
         class_date = datetime.strptime(data.date, "%Y-%m-%d")
         day_short = class_date.strftime("%a")
 
-        cur.execute("""
-            SELECT 1
-            FROM timetable_slots
-            WHERE LOWER(department)=LOWER(%s)
-              AND LOWER(semester)=LOWER(%s)
-              AND LOWER(section)=LOWER(%s)
-              AND LOWER(subject_id)=LOWER(%s)
-              AND LOWER(day)=LOWER(%s)
-            LIMIT 1
-        """, (
-            data.department,
-            data.semester,
-            data.section,
-            data.subject,
-            day_short
-        ))
+        section_value = (data.section or "").lower()
+
+        # ======================================================
+        # 🔥 THEORY vs PRACTICAL PERIOD CHECK
+        # ======================================================
+
+        if section_value == "all":
+            # 🔹 THEORY → ignore section
+            cur.execute("""
+                SELECT 1
+                FROM timetable_slots
+                WHERE LOWER(TRIM(department)) = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(semester))   = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(subject_id)) = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(day))        = LOWER(TRIM(%s))
+                LIMIT 1
+            """, (
+                data.department,
+                data.semester,
+                data.subject,
+                day_short
+            ))
+        else:
+            # 🔹 PRACTICAL → match section
+            cur.execute("""
+                SELECT 1
+                FROM timetable_slots
+                WHERE LOWER(TRIM(department)) = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(semester))   = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(section))    = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(subject_id)) = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(day))        = LOWER(TRIM(%s))
+                LIMIT 1
+            """, (
+                data.department,
+                data.semester,
+                data.section,
+                data.subject,
+                day_short
+            ))
 
         period_exists = cur.fetchone()
 
@@ -725,6 +773,7 @@ def mark_attendance(data: AttendanceRequest):
         conn.close()
 
     return {"status": "saved"}
+
 
 
 # ======================================================
