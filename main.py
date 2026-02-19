@@ -470,22 +470,19 @@ def get_subjects_by_date(department: str, semester: str, date: str):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT
+        SELECT DISTINCT
             t.subject_id,
-            COALESCE(s.subject_name, t.subject_id) AS subject_name,
-            COALESCE(s.type, t.type) AS type,
-            MIN(t.period_no) as first_period
+            t.subject_id AS subject_name,
+            t.type,
+            MIN(t.period_no) AS first_period
         FROM timetable_slots t
-        LEFT JOIN subjects s
-          ON LOWER(TRIM(t.subject_id)) = LOWER(TRIM(s.subject_id))
-         AND LOWER(TRIM(t.semester))   = LOWER(TRIM(s.semester))
-         AND LOWER(TRIM(t.department)) = LOWER(TRIM(s.department))
         WHERE LOWER(TRIM(t.department)) = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.semester))   = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.day))        = LOWER(TRIM(%s))
-        GROUP BY t.subject_id, s.subject_name, s.type, t.type
+        AND LOWER(TRIM(t.semester))   = LOWER(TRIM(%s))
+        AND LOWER(TRIM(t.day))        = LOWER(TRIM(%s))
+        GROUP BY t.subject_id, t.type
         ORDER BY first_period
     """, (department, semester, weekday_short))
+
 
     rows = cur.fetchall()
     conn.close()
