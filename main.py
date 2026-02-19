@@ -457,7 +457,12 @@ def get_subjects_by_date(department: str, semester: str, date: str):
 
     try:
         parsed_date = datetime.strptime(date, "%Y-%m-%d")
-        weekday_name = parsed_date.strftime("%A")
+
+        # ✅ IMPORTANT: use short day name (Mon, Tue...)
+        weekday_short = parsed_date.strftime("%a").strip()
+
+        print("DEBUG weekday:", weekday_short)
+
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format")
 
@@ -472,18 +477,20 @@ def get_subjects_by_date(department: str, semester: str, date: str):
             MIN(t.period_no) as first_period
         FROM timetable_slots t
         JOIN subjects s
-          ON t.subject_id = s.subject_id
-         AND LOWER(t.semester)=LOWER(s.semester)
-         AND LOWER(t.department)=LOWER(s.department)
-        WHERE LOWER(t.department)=LOWER(%s)
-          AND LOWER(t.semester)=LOWER(%s)
-          AND LOWER(t.day)=LOWER(%s)
+          ON LOWER(TRIM(t.subject_id)) = LOWER(TRIM(s.subject_id))
+         AND LOWER(TRIM(t.semester))   = LOWER(TRIM(s.semester))
+         AND LOWER(TRIM(t.department)) = LOWER(TRIM(s.department))
+        WHERE LOWER(TRIM(t.department)) = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.semester))   = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.day))        = LOWER(TRIM(%s))
         GROUP BY s.subject_id, s.subject_name, s.type
         ORDER BY first_period
-    """, (department, semester, weekday_name))
+    """, (department, semester, weekday_short))
 
     rows = cur.fetchall()
     conn.close()
+
+    print("DEBUG subjects found:", len(rows))
 
     return [
         {
@@ -493,6 +500,7 @@ def get_subjects_by_date(department: str, semester: str, date: str):
         }
         for r in rows
     ]
+
 
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION)
