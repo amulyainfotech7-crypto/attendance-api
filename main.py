@@ -1092,3 +1092,104 @@ def sync_attendance_from_cloud(
         "latest_sync": latest_sync,
         "records": data
     }
+
+
+# ======================================================
+# SAVE TIMETABLE (DESKTOP → CLOUD)
+# ======================================================
+
+@app.post("/sync/timetable")
+def save_timetable_from_desktop(payload: dict):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            INSERT INTO timetable_slots
+            (department, semester, section, day,
+             period_no, period_len, type,
+             subject_id, faculty_id, room)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT DO NOTHING
+        """, (
+            payload["department"],
+            payload["semester"],
+            payload["section"],
+            payload["day"],
+            payload["period_no"],
+            payload.get("period_len"),
+            payload.get("type"),
+            payload.get("subject_id"),
+            payload.get("faculty_id"),
+            payload.get("room"),
+        ))
+
+        conn.commit()
+        conn.close()
+
+        return {"status": "success"}
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+# ======================================================
+# RESET TIMETABLE (DESKTOP → CLOUD)
+# ======================================================
+
+@app.delete("/sync/timetable")
+def reset_timetable_from_desktop(department: str, semester: str):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            DELETE FROM timetable_slots
+            WHERE LOWER(department)=LOWER(%s)
+              AND LOWER(semester)=LOWER(%s)
+        """, (department, semester))
+
+        conn.commit()
+        conn.close()
+
+        return {"status": "deleted"}
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.delete("/sync/full-reset")
+def full_reset_cloud():
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname='public';
+        """)
+
+        tables = [row[0] for row in cur.fetchall()]
+
+        protected = {"users"}  # protect admin login table if needed
+
+        for table in tables:
+            if table not in protected:
+                cur.execute(f'TRUNCATE TABLE "{table}" RESTART IDENTITY CASCADE;')
+                print(f"☁ Cleared cloud table: {table}")
+
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    return {"status": "cloud_reset_complete"}
