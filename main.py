@@ -170,13 +170,13 @@ def startup():
     """)
 
     # ======================================================
-    # ATTENDANCE TABLE
+    # ATTENDANCE TABLE (SAFE VERSION)
     # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_daily(
             id SERIAL PRIMARY KEY,
             sbrn TEXT NOT NULL,
-            subject TEXT NOT NULL,
+            subject TEXT,
             semester TEXT NOT NULL,
             section TEXT NOT NULL,
             class_date DATE NOT NULL,
@@ -185,48 +185,42 @@ def startup():
         );
     """)
 
-   
     # ======================================================
-    # SAFE COLUMN MIGRATION (Render Safe)
+    # SAFE MIGRATION FOR OLD DATABASES
     # ======================================================
 
+    # Get existing columns
     cur.execute("""
         SELECT column_name
         FROM information_schema.columns
         WHERE table_name='attendance_daily'
     """)
-
     columns = [row[0] for row in cur.fetchall()]
 
-    if "subject_id" in columns and "subject" not in columns:
+    # 🔄 Rename old column first
+    if "subject_id" in columns:
         print("🔄 Migrating subject_id → subject")
         cur.execute("ALTER TABLE attendance_daily RENAME COLUMN subject_id TO subject;")
 
-    # Ensure subject column exists
+    # 🔒 Ensure required columns exist
     cur.execute("""
         ALTER TABLE attendance_daily
         ADD COLUMN IF NOT EXISTS subject TEXT;
     """)
 
-    # ======================================================
-    # 🔒 Ensure subject column exists (extra safety)
-    # ======================================================
     cur.execute("""
         ALTER TABLE attendance_daily
-        ADD COLUMN IF NOT EXISTS subject TEXT;
+        ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
     """)
 
     # ======================================================
-    # UNIQUE CONSTRAINT (Prevent duplicate attendance)
+    # UNIQUE + PERFORMANCE INDEXES
     # ======================================================
     cur.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique
         ON attendance_daily (sbrn, subject, semester, section, class_date);
     """)
 
-    # ======================================================
-    # PERFORMANCE INDEXES
-    # ======================================================
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_attendance_semester
         ON attendance_daily (semester);
