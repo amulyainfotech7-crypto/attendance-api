@@ -185,24 +185,27 @@ def startup():
         );
     """)
 
+   
     # ======================================================
-    # 🔥 SAFE MIGRATION FOR OLD DATABASES
-    # (If column was previously named subject_id)
+    # SAFE COLUMN MIGRATION (Render Safe)
     # ======================================================
+
     cur.execute("""
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_name='attendance_daily'
-                  AND column_name='subject_id'
-            ) THEN
-                ALTER TABLE attendance_daily
-                RENAME COLUMN subject_id TO subject;
-            END IF;
-        END
-        $$;
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name='attendance_daily'
+    """)
+
+    columns = [row[0] for row in cur.fetchall()]
+
+    if "subject_id" in columns and "subject" not in columns:
+        print("🔄 Migrating subject_id → subject")
+        cur.execute("ALTER TABLE attendance_daily RENAME COLUMN subject_id TO subject;")
+
+    # Ensure subject column exists
+    cur.execute("""
+        ALTER TABLE attendance_daily
+        ADD COLUMN IF NOT EXISTS subject TEXT;
     """)
 
     # ======================================================
