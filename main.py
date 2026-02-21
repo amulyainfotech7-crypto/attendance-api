@@ -1176,12 +1176,11 @@ def full_reset_cloud():
 
         tables = [row[0] for row in cur.fetchall()]
 
-        protected = {"users"}  # protect admin login table if needed
+        protected = {"users"}  # protect login accounts
 
         for table in tables:
             if table not in protected:
                 cur.execute(f'TRUNCATE TABLE "{table}" RESTART IDENTITY CASCADE;')
-                print(f"☁ Cleared cloud table: {table}")
 
         conn.commit()
 
