@@ -1095,47 +1095,6 @@ def sync_attendance_from_cloud(
 
 
 # ======================================================
-# SAVE TIMETABLE (DESKTOP → CLOUD)
-# ======================================================
-
-@app.post("/sync/timetable")
-def save_timetable_from_desktop(payload: dict):
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    try:
-        cur.execute("""
-            INSERT INTO timetable_slots
-            (department, semester, section, day,
-             period_no, period_len, type,
-             subject_id, faculty_id, room)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT DO NOTHING
-        """, (
-            payload["department"],
-            payload["semester"],
-            payload["section"],
-            payload["day"],
-            payload["period_no"],
-            payload.get("period_len"),
-            payload.get("type"),
-            payload.get("subject_id"),
-            payload.get("faculty_id"),
-            payload.get("room"),
-        ))
-
-        conn.commit()
-        conn.close()
-
-        return {"status": "success"}
-
-    except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=500, detail=str(e))
-    
-
-# ======================================================
 # RESET TIMETABLE (DESKTOP → CLOUD)
 # ======================================================
 
