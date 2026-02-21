@@ -588,72 +588,6 @@ def get_students(department: str, semester: str, section: str):
         for r in rows
     ]
 
-
-# ======================================================
-# 🔥 CLOUD → DESKTOP STUDENT SYNC (INCREMENTAL SAFE)
-# ======================================================
-
-from fastapi import Query
-from typing import Optional
-
-@app.get("/sync/students")
-def get_students_sync(last_sync: Optional[str] = Query(default=None)):
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    try:
-
-        if last_sync:
-            # 🔒 Explicit timestamp casting prevents type mismatch
-            cur.execute("""
-                SELECT sbrn, name, semester, section, department,
-                       course, batch, admission_date,
-                       year_semester, academic_status,
-                       last_updated, version
-                FROM students
-                WHERE last_updated > %s::timestamp
-                ORDER BY last_updated ASC
-            """, (last_sync,))
-        else:
-            # 🔹 First full sync
-            cur.execute("""
-                SELECT sbrn, name, semester, section, department,
-                       course, batch, admission_date,
-                       year_semester, academic_status,
-                       last_updated, version
-                FROM students
-                ORDER BY last_updated ASC
-            """)
-
-        rows = cur.fetchall()
-
-    except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=500, detail=str(e))
-
-    conn.close()
-
-    return [
-        {
-            "sbrn": r[0],
-            "name": r[1],
-            "semester": r[2],
-            "section": r[3],
-            "department": r[4],
-            "course": r[5],
-            "batch": r[6],
-            "admission_date": r[7],
-            "year_semester": r[8],
-            "academic_status": r[9],
-            # 🔥 ISO format for JSON safety
-            "last_updated": r[10].isoformat() if r[10] else None,
-            "version": r[11]
-        }
-        for r in rows
-    ]
-
-
 # ======================================================
 # CHECK ATTENDANCE EXISTS
 # ======================================================
@@ -1019,6 +953,65 @@ def sync_students_from_cloud(
             # 🔥 Soft delete support
             "is_deleted": r[12],
             "deleted_at": r[13].isoformat() if r[13] else None,
+        }
+        for r in rows
+    ]
+# ======================================================
+# 🔥 INCREMENTAL ATTENDANCE SYNC (CLOUD → DESKTOP SAFE)
+# ======================================================
+
+@app.get("/sync/attendance")
+def sync_attendance_from_cloud(
+    since: Optional[str] = Query(default=None)
+):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        if since:
+            cur.execute("""
+                SELECT
+                    sbrn,
+                    subject_id,
+                    semester,
+                    section,
+                    class_date,
+                    attended
+                FROM attendance_daily
+                WHERE class_date >= %s::date
+                ORDER BY class_date ASC
+            """, (since,))
+        else:
+            cur.execute("""
+                SELECT
+                    sbrn,
+                    subject_id,
+                    semester,
+                    section,
+                    class_date,
+                    attended
+                FROM attendance_daily
+                ORDER BY class_date ASC
+            """)
+
+        rows = cur.fetchall()
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    return [
+        {
+            "sbrn": r[0],
+            "subject_id": r[1],
+            "semester": r[2],
+            "section": r[3],
+            "class_date": r[4].strftime("%Y-%m-%d"),
+            "attended": r[5]
         }
         for r in rows
     ]
