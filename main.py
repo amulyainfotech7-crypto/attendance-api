@@ -4,6 +4,9 @@ from fastapi.middleware.gzip import GZipMiddleware
 from database import connect_db
 from models import LoginModel, AttendanceRequest
 from psycopg2.extras import execute_batch
+from fastapi import Body
+from fastapi import Query
+from typing import Optional
 import hashlib
 import base64
 from datetime import datetime
@@ -59,7 +62,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 # ======================================================
-# STARTUP – CREATE TABLES
+# STARTUP – CREATE TABLES (FINAL PRODUCTION VERSION)
 # ======================================================
 
 @app.on_event("startup")
@@ -68,7 +71,9 @@ def startup():
     conn = connect_db()
     cur = conn.cursor()
 
+    # ======================================================
     # USERS
+    # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users(
             username TEXT PRIMARY KEY,
@@ -81,7 +86,6 @@ def startup():
     # ======================================================
     # STUDENTS (FULL SYNC READY)
     # ======================================================
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS students(
             sbrn TEXT PRIMARY KEY,
@@ -98,67 +102,29 @@ def startup():
             -- 🔥 SYNC ENGINE
             last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             version INTEGER DEFAULT 1,
-            sync_pending INTEGER DEFAULT 0
+            sync_pending INTEGER DEFAULT 0,
+
+            -- 🔥 SOFT DELETE
+            is_deleted INTEGER DEFAULT 0,
+            deleted_at TIMESTAMP
         )
     """)
 
     # 🔒 Safe column repair (for old DBs)
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS course TEXT
-    """)
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS course TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS batch TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS admission_date TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS year_semester TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS academic_status TEXT DEFAULT 'REGULAR'")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP")
 
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS batch TEXT
-    """)
-
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS admission_date TEXT
-    """)
-
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS year_semester TEXT
-    """)
-
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS academic_status TEXT DEFAULT 'REGULAR'
-    """)
-
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    """)
-
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1
-    """)
-
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0
-    """)
-
-    # --------------------------------------------------
-    # 🔥 SOFT DELETE SUPPORT (ENTERPRISE SAFE)
-    # --------------------------------------------------
-
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0
-    """)
-
-    cur.execute("""
-        ALTER TABLE students
-        ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP
-    """)
-
-
+    # ======================================================
     # SUBJECTS
+    # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS subjects(
             subject_id TEXT,
@@ -170,7 +136,9 @@ def startup():
         )
     """)
 
-    # 🔥 TIMETABLE (FULL SYNC READY)
+    # ======================================================
+    # TIMETABLE (FULL SYNC READY)
+    # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS timetable_slots(
             id SERIAL PRIMARY KEY,
@@ -193,7 +161,6 @@ def startup():
     # ======================================================
     # 🔥 AUTO-HEAL SUBJECTS TABLE (PERMANENT FIX)
     # ======================================================
-
     cur.execute("""
         INSERT INTO subjects (subject_id, subject_name, department, semester, type)
         SELECT DISTINCT
@@ -207,19 +174,37 @@ def startup():
         ON CONFLICT DO NOTHING;
     """)
 
-
-
-    # ATTENDANCE
+    # ======================================================
+    # ATTENDANCE (ALIGNED WITH DESKTOP)
+    # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_daily(
-            sbrn TEXT,
-            subject_id TEXT,
-            semester TEXT,
-            section TEXT,
-            class_date DATE,
-            attended INTEGER,
-            PRIMARY KEY (sbrn, subject_id, class_date, section)
-        )
+            id SERIAL PRIMARY KEY,
+            sbrn TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            semester TEXT NOT NULL,
+            section TEXT NOT NULL,
+            class_date DATE NOT NULL,
+            attended INTEGER NOT NULL,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
+    # 🔥 Prevent duplicate attendance rows
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique
+        ON attendance_daily (sbrn, subject, semester, section, class_date);
+    """)
+
+    # 🔥 Performance indexes
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_attendance_semester
+        ON attendance_daily (semester);
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_attendance_subject
+        ON attendance_daily (subject);
     """)
 
     conn.commit()
@@ -377,9 +362,6 @@ def sync_timetable(records: list = Body(...)):
 # 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL SAFE)
 # ======================================================
 
-from fastapi import Query
-from typing import Optional
-
 @app.get("/sync/timetable")
 def get_timetable_sync(last_sync: Optional[str] = Query(default=None)):
 
@@ -389,18 +371,24 @@ def get_timetable_sync(last_sync: Optional[str] = Query(default=None)):
     try:
 
         if last_sync:
-            # 🔒 Safe explicit timestamp casting
+            try:
+                parsed_sync = datetime.fromisoformat(last_sync)
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid 'last_sync' timestamp format."
+                )
+
             cur.execute("""
                 SELECT department, semester, section, day,
                        period_no, period_len, type,
                        subject_id, faculty_id, room,
                        last_updated, version
                 FROM timetable_slots
-                WHERE last_updated > %s::timestamp
+                WHERE last_updated > %s
                 ORDER BY last_updated ASC
-            """, (last_sync,))
+            """, (parsed_sync,))
         else:
-            # 🔹 First full sync
             cur.execute("""
                 SELECT department, semester, section, day,
                        period_no, period_len, type,
@@ -418,7 +406,7 @@ def get_timetable_sync(last_sync: Optional[str] = Query(default=None)):
 
     conn.close()
 
-    return [
+    data = [
         {
             "department": r[0],
             "semester": r[1],
@@ -430,13 +418,22 @@ def get_timetable_sync(last_sync: Optional[str] = Query(default=None)):
             "subject_id": r[7],
             "faculty_id": r[8],
             "room": r[9],
-            # 🔥 Ensure ISO format string
             "last_updated": r[10].isoformat() if r[10] else None,
             "version": r[11]
         }
         for r in rows
     ]
 
+    latest_sync = None
+    if rows:
+        latest_sync = rows[-1][10].isoformat()
+
+    return {
+        "status": "success",
+        "count": len(data),
+        "latest_sync": latest_sync,
+        "records": data
+    }
 
 # ======================================================
 # GET TIMETABLE
@@ -521,7 +518,6 @@ def get_subjects_by_date(department: str, semester: str, date: str):
     ]
 
 
-
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION)
 # ======================================================
@@ -589,7 +585,7 @@ def get_students(department: str, semester: str, section: str):
     ]
 
 # ======================================================
-# CHECK ATTENDANCE EXISTS
+# CHECK ATTENDANCE EXISTS (FIXED)
 # ======================================================
 
 @app.get("/attendance-exists")
@@ -601,7 +597,7 @@ def attendance_exists(semester: str, section: str, subject: str, date: str):
     cur.execute("""
         SELECT 1 FROM attendance_daily
         WHERE LOWER(semester)=LOWER(%s)
-          AND LOWER(subject_id)=LOWER(%s)
+          AND LOWER(subject)=LOWER(%s)
           AND class_date=%s
           AND LOWER(section)=LOWER(%s)
         LIMIT 1
@@ -613,7 +609,7 @@ def attendance_exists(semester: str, section: str, subject: str, date: str):
     return {"exists": exists}
 
 # ======================================================
-# MARK ATTENDANCE
+# MARK ATTENDANCE (ALIGNED WITH NEW STRUCTURE)
 # ======================================================
 
 @app.post("/mark-attendance")
@@ -636,7 +632,7 @@ def mark_attendance(data: AttendanceRequest):
         # ======================================================
 
         if section_value == "all":
-            # 🔹 THEORY → ignore section
+            # THEORY → ignore section
             cur.execute("""
                 SELECT 1
                 FROM timetable_slots
@@ -652,7 +648,7 @@ def mark_attendance(data: AttendanceRequest):
                 day_short
             ))
         else:
-            # 🔹 PRACTICAL → match section
+            # PRACTICAL → match section
             cur.execute("""
                 SELECT 1
                 FROM timetable_slots
@@ -670,27 +666,27 @@ def mark_attendance(data: AttendanceRequest):
                 day_short
             ))
 
-        period_exists = cur.fetchone()
-
-        if not period_exists:
+        if not cur.fetchone():
             return {
                 "status": "no_period",
                 "message": "No period today"
             }
 
         # ======================================================
-        # 🔥 SAVE ATTENDANCE
+        # 🔥 SAVE ATTENDANCE (ALIGNED WITH NEW TABLE)
         # ======================================================
         for rec in data.attendance:
             cur.execute("""
                 INSERT INTO attendance_daily
-                (sbrn, subject_id, semester, section, class_date, attended)
+                (sbrn, subject, semester, section, class_date, attended)
                 VALUES (%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (sbrn, subject_id, class_date, section)
-                DO UPDATE SET attended=EXCLUDED.attended
+                ON CONFLICT (sbrn, subject, semester, section, class_date)
+                DO UPDATE SET
+                    attended = EXCLUDED.attended,
+                    last_updated = CURRENT_TIMESTAMP
             """, (
                 rec.sbrn,
-                data.subject,
+                data.subject,     # subject now matches column
                 data.semester,
                 data.section,
                 data.date,
@@ -708,10 +704,8 @@ def mark_attendance(data: AttendanceRequest):
 
     return {"status": "saved"}
 
-
-
 # ======================================================
-# GET ATTENDANCE
+# GET ATTENDANCE (ALIGNED WITH NEW STRUCTURE)
 # ======================================================
 
 @app.get("/attendance")
@@ -722,7 +716,7 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
 
     cur.execute("""
         SELECT a.sbrn,
-               a.subject_id,
+               a.subject,
                a.semester,
                a.section,
                a.class_date,
@@ -733,7 +727,7 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
           AND LOWER(a.semester)=LOWER(%s)
           AND EXTRACT(MONTH FROM a.class_date)=%s
           AND EXTRACT(YEAR FROM a.class_date)=%s
-          AND LOWER(a.subject_id)=LOWER(%s)
+          AND LOWER(a.subject)=LOWER(%s)
     """, (department, semester, month, year, subject))
 
     rows = cur.fetchall()
@@ -742,7 +736,7 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
     return [
         {
             "sbrn": r[0],
-            "subject_id": r[1],
+            "subject": r[1],   # 🔥 changed from subject_id
             "semester": r[2],
             "section": r[3],
             "class_date": r[4].strftime("%Y-%m-%d"),
@@ -752,11 +746,9 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
     ]
 
 # ======================================================
-# 🔥 SYNC STUDENTS (LOCAL → CLOUD) — ENTERPRISE SAFE
+# 🔥 SYNC STUDENTS (LOCAL → CLOUD) — FINAL ENTERPRISE SAFE
 # ======================================================
 
-from psycopg2.extras import execute_batch
-from fastapi import Body, HTTPException
 
 @app.post("/sync/students")
 def sync_students(records: list = Body(...)):
@@ -764,10 +756,14 @@ def sync_students(records: list = Body(...)):
     if not records:
         return {"status": "no_data"}
 
-    # 🔥 Normalize records (prevent KeyError)
     normalized = []
 
     for r in records:
+
+        # 🔒 Critical validation
+        if not r.get("sbrn"):
+            continue   # skip invalid records safely
+
         normalized.append({
             "sbrn": r.get("sbrn"),
             "name": r.get("name"),
@@ -779,13 +775,18 @@ def sync_students(records: list = Body(...)):
             "admission_date": r.get("admission_date"),
             "year_semester": r.get("year_semester"),
             "academic_status": r.get("academic_status", "REGULAR"),
-            "last_updated": r.get("last_updated"),
+
+            # 🔥 Sync engine
+            "last_updated": r.get("last_updated") or datetime.utcnow(),
             "version": r.get("version", 1),
 
-            # 🔥 Safe defaults
+            # 🔥 Soft delete
             "is_deleted": r.get("is_deleted", 0),
             "deleted_at": r.get("deleted_at"),
         })
+
+    if not normalized:
+        return {"status": "no_valid_records"}
 
     conn = connect_db()
     cur = conn.cursor()
@@ -859,13 +860,10 @@ def sync_students(records: list = Body(...)):
         "rows_processed": len(normalized)
     }
 
-
 # ======================================================
 # 🔥 INCREMENTAL STUDENT SYNC (CLOUD → DESKTOP SAFE)
 # ======================================================
 
-from fastapi import Query, HTTPException
-from typing import Optional
 
 @app.get("/sync/students")
 def sync_students_from_cloud(
@@ -877,8 +875,18 @@ def sync_students_from_cloud(
 
     try:
 
+        # --------------------------------------------------
+        # 🔒 Validate & parse timestamp safely
+        # --------------------------------------------------
         if since:
-            # 🔒 Explicit timestamp casting prevents type mismatch
+            try:
+                parsed_since = datetime.fromisoformat(since)
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid 'since' timestamp format. Use ISO format."
+                )
+
             cur.execute("""
                 SELECT
                     sbrn,
@@ -896,9 +904,9 @@ def sync_students_from_cloud(
                     is_deleted,
                     deleted_at
                 FROM students
-                WHERE last_updated > %s::timestamp
+                WHERE last_updated > %s
                 ORDER BY last_updated ASC
-            """, (since,))
+            """, (parsed_since,))
         else:
             # 🔹 First full sync
             cur.execute("""
@@ -929,11 +937,11 @@ def sync_students_from_cloud(
 
     conn.close()
 
-    # -----------------------------------------------------
+    # --------------------------------------------------
     # 🔥 JSON SAFE RESPONSE
-    # -----------------------------------------------------
+    # --------------------------------------------------
 
-    return [
+    data = [
         {
             "sbrn": r[0],
             "name": r[1],
@@ -945,17 +953,26 @@ def sync_students_from_cloud(
             "admission_date": r[7],
             "year_semester": r[8],
             "academic_status": r[9],
-
-            # 🔥 ISO conversion for datetime safety
             "last_updated": r[10].isoformat() if r[10] else None,
             "version": r[11],
-
-            # 🔥 Soft delete support
             "is_deleted": r[12],
             "deleted_at": r[13].isoformat() if r[13] else None,
         }
         for r in rows
     ]
+
+    # 🔥 Return latest timestamp (critical for incremental sync)
+    latest_sync = None
+    if rows:
+        latest_sync = rows[-1][10].isoformat()
+
+    return {
+        "status": "success",
+        "count": len(data),
+        "latest_sync": latest_sync,
+        "records": data
+    }
+
 # ======================================================
 # 🔥 INCREMENTAL ATTENDANCE SYNC (CLOUD → DESKTOP SAFE)
 # ======================================================
@@ -970,30 +987,44 @@ def sync_attendance_from_cloud(
 
     try:
 
+        # --------------------------------------------------
+        # 🔒 Validate timestamp safely
+        # --------------------------------------------------
         if since:
+            try:
+                parsed_since = datetime.fromisoformat(since)
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid 'since' timestamp format. Use ISO format."
+                )
+
             cur.execute("""
                 SELECT
                     sbrn,
-                    subject_id,
+                    subject,
                     semester,
                     section,
                     class_date,
-                    attended
+                    attended,
+                    last_updated
                 FROM attendance_daily
-                WHERE class_date >= %s::date
-                ORDER BY class_date ASC
-            """, (since,))
+                WHERE last_updated > %s
+                ORDER BY last_updated ASC
+            """, (parsed_since,))
         else:
+            # First full sync
             cur.execute("""
                 SELECT
                     sbrn,
-                    subject_id,
+                    subject,
                     semester,
                     section,
                     class_date,
-                    attended
+                    attended,
+                    last_updated
                 FROM attendance_daily
-                ORDER BY class_date ASC
+                ORDER BY last_updated ASC
             """)
 
         rows = cur.fetchall()
@@ -1004,14 +1035,31 @@ def sync_attendance_from_cloud(
 
     conn.close()
 
-    return [
+    # --------------------------------------------------
+    # 🔥 JSON SAFE RESPONSE
+    # --------------------------------------------------
+
+    data = [
         {
             "sbrn": r[0],
-            "subject_id": r[1],
+            "subject": r[1],  # 🔥 fixed (no subject_id)
             "semester": r[2],
             "section": r[3],
             "class_date": r[4].strftime("%Y-%m-%d"),
-            "attended": r[5]
+            "attended": r[5],
+            "last_updated": r[6].isoformat() if r[6] else None
         }
         for r in rows
     ]
+
+    # 🔥 Critical: return latest sync timestamp
+    latest_sync = None
+    if rows:
+        latest_sync = rows[-1][6].isoformat()
+
+    return {
+        "status": "success",
+        "count": len(data),
+        "latest_sync": latest_sync,
+        "records": data
+    }
