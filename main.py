@@ -4,7 +4,6 @@ from fastapi.middleware.gzip import GZipMiddleware
 from database import connect_db
 from models import LoginModel, AttendanceRequest
 from psycopg2.extras import execute_batch
-from fastapi import Body
 from fastapi import Query
 from typing import Optional
 import hashlib
@@ -62,7 +61,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 # ======================================================
-# STARTUP – CREATE TABLES (FINAL PRODUCTION VERSION)
+# STARTUP – CREATE TABLES (FINAL PRODUCTION SAFE VERSION)
 # ======================================================
 
 @app.on_event("startup")
@@ -98,19 +97,15 @@ def startup():
             admission_date TEXT,
             year_semester TEXT,
             academic_status TEXT DEFAULT 'REGULAR',
-
-            -- 🔥 SYNC ENGINE
             last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             version INTEGER DEFAULT 1,
             sync_pending INTEGER DEFAULT 0,
-
-            -- 🔥 SOFT DELETE
             is_deleted INTEGER DEFAULT 0,
             deleted_at TIMESTAMP
         )
     """)
 
-    # 🔒 Safe column repair (for old DBs)
+    # 🔒 Safe column repair (old DB compatibility)
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS course TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS batch TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS admission_date TEXT")
@@ -137,7 +132,7 @@ def startup():
     """)
 
     # ======================================================
-    # TIMETABLE (FULL SYNC READY)
+    # TIMETABLE
     # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS timetable_slots(
@@ -159,7 +154,7 @@ def startup():
     """)
 
     # ======================================================
-    # 🔥 AUTO-HEAL SUBJECTS TABLE (PERMANENT FIX)
+    # AUTO-HEAL SUBJECTS
     # ======================================================
     cur.execute("""
         INSERT INTO subjects (subject_id, subject_name, department, semester, type)
@@ -175,7 +170,7 @@ def startup():
     """)
 
     # ======================================================
-    # ATTENDANCE (ALIGNED WITH DESKTOP)
+    # ATTENDANCE TABLE
     # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_daily(
@@ -190,13 +185,45 @@ def startup():
         );
     """)
 
-    # 🔥 Prevent duplicate attendance rows
+    # ======================================================
+    # 🔥 SAFE MIGRATION FOR OLD DATABASES
+    # (If column was previously named subject_id)
+    # ======================================================
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name='attendance_daily'
+                  AND column_name='subject_id'
+            ) THEN
+                ALTER TABLE attendance_daily
+                RENAME COLUMN subject_id TO subject;
+            END IF;
+        END
+        $$;
+    """)
+
+    # ======================================================
+    # 🔒 Ensure subject column exists (extra safety)
+    # ======================================================
+    cur.execute("""
+        ALTER TABLE attendance_daily
+        ADD COLUMN IF NOT EXISTS subject TEXT;
+    """)
+
+    # ======================================================
+    # UNIQUE CONSTRAINT (Prevent duplicate attendance)
+    # ======================================================
     cur.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique
         ON attendance_daily (sbrn, subject, semester, section, class_date);
     """)
 
-    # 🔥 Performance indexes
+    # ======================================================
+    # PERFORMANCE INDEXES
+    # ======================================================
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_attendance_semester
         ON attendance_daily (semester);
@@ -205,6 +232,11 @@ def startup():
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_attendance_subject
         ON attendance_daily (subject);
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_attendance_last_updated
+        ON attendance_daily (last_updated);
     """)
 
     conn.commit()
