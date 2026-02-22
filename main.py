@@ -105,7 +105,7 @@ def startup():
         )
     """)
 
-    # 🔒 Safe column repair (old DB compatibility)
+    # Safe column repair (backward compatibility)
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS course TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS batch TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS admission_date TEXT")
@@ -154,7 +154,7 @@ def startup():
     """)
 
     # ======================================================
-    # AUTO-HEAL SUBJECTS
+    # AUTO-HEAL SUBJECTS FROM TIMETABLE
     # ======================================================
     cur.execute("""
         INSERT INTO subjects (subject_id, subject_name, department, semester, type)
@@ -170,26 +170,25 @@ def startup():
     """)
 
     # ======================================================
-    # ATTENDANCE TABLE (SAFE VERSION)
+    # ATTENDANCE TABLE (DESKTOP-ALIGNED FINAL STRUCTURE)
     # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_daily(
-            id SERIAL PRIMARY KEY,
             sbrn TEXT NOT NULL,
-            subject TEXT,
+            subject_id TEXT NOT NULL,
+            subject TEXT NOT NULL,
             semester TEXT NOT NULL,
             section TEXT NOT NULL,
             class_date DATE NOT NULL,
             attended INTEGER NOT NULL,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (sbrn, subject_id, semester, section, class_date)
         );
     """)
 
     # ======================================================
-    # SAFE MIGRATION FOR OLD DATABASES
+    # SAFE REBUILD FOR VERY OLD DATABASES (if legacy id column exists)
     # ======================================================
-
-    # Get existing columns
     cur.execute("""
         SELECT column_name
         FROM information_schema.columns
@@ -197,38 +196,54 @@ def startup():
     """)
     columns = [row[0] for row in cur.fetchall()]
 
-    # 🔄 Rename old column first
-    if "subject_id" in columns:
-        print("🔄 Migrating subject_id → subject")
-        cur.execute("ALTER TABLE attendance_daily RENAME COLUMN subject_id TO subject;")
+    if "id" in columns:
+        print("🔄 Rebuilding legacy attendance_daily table...")
 
-    # 🔒 Ensure required columns exist
-    cur.execute("""
-        ALTER TABLE attendance_daily
-        ADD COLUMN IF NOT EXISTS subject TEXT;
-    """)
+        cur.execute("ALTER TABLE attendance_daily RENAME TO attendance_old;")
 
-    cur.execute("""
-        ALTER TABLE attendance_daily
-        ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-    """)
+        cur.execute("""
+            CREATE TABLE attendance_daily(
+                sbrn TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                semester TEXT NOT NULL,
+                section TEXT NOT NULL,
+                class_date DATE NOT NULL,
+                attended INTEGER NOT NULL,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (sbrn, subject_id, semester, section, class_date)
+            );
+        """)
+
+        cur.execute("""
+            INSERT INTO attendance_daily
+            (sbrn, subject_id, subject, semester, section, class_date, attended, last_updated)
+            SELECT
+                sbrn,
+                subject AS subject_id,
+                subject,
+                semester,
+                section,
+                class_date,
+                attended,
+                last_updated
+            FROM attendance_old;
+        """)
+
+        cur.execute("DROP TABLE attendance_old;")
+        print("✅ attendance_daily rebuilt successfully.")
 
     # ======================================================
-    # UNIQUE + PERFORMANCE INDEXES
+    # PERFORMANCE INDEXES (SAFE)
     # ======================================================
-    cur.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_unique
-        ON attendance_daily (sbrn, subject, semester, section, class_date);
-    """)
-
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_attendance_semester
         ON attendance_daily (semester);
     """)
 
     cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_attendance_subject
-        ON attendance_daily (subject);
+        CREATE INDEX IF NOT EXISTS idx_attendance_subject_id
+        ON attendance_daily (subject_id);
     """)
 
     cur.execute("""
@@ -638,7 +653,7 @@ def attendance_exists(semester: str, section: str, subject: str, date: str):
     return {"exists": exists}
 
 # ======================================================
-# MARK ATTENDANCE (ALIGNED WITH NEW STRUCTURE)
+# MARK ATTENDANCE (PERMANENT DESKTOP-ALIGNED VERSION)
 # ======================================================
 
 @app.post("/mark-attendance")
@@ -648,20 +663,19 @@ def mark_attendance(data: AttendanceRequest):
     cur = conn.cursor()
 
     try:
-        # ======================================================
-        # 🔥 CHECK IF PERIOD EXISTS
-        # ======================================================
+        # --------------------------------------------------
+        # 1️⃣ Validate date
+        # --------------------------------------------------
         class_date = datetime.strptime(data.date, "%Y-%m-%d")
         day_short = class_date.strftime("%a")
 
         section_value = (data.section or "").lower()
 
-        # ======================================================
-        # 🔥 THEORY vs PRACTICAL PERIOD CHECK
-        # ======================================================
-
+        # --------------------------------------------------
+        # 2️⃣ Verify timetable period exists
+        # --------------------------------------------------
         if section_value == "all":
-            # THEORY → ignore section
+            # THEORY
             cur.execute("""
                 SELECT 1
                 FROM timetable_slots
@@ -677,7 +691,7 @@ def mark_attendance(data: AttendanceRequest):
                 day_short
             ))
         else:
-            # PRACTICAL → match section
+            # PRACTICAL
             cur.execute("""
                 SELECT 1
                 FROM timetable_slots
@@ -701,21 +715,23 @@ def mark_attendance(data: AttendanceRequest):
                 "message": "No period today"
             }
 
-        # ======================================================
-        # 🔥 SAVE ATTENDANCE (ALIGNED WITH NEW TABLE)
-        # ======================================================
+        # --------------------------------------------------
+        # 3️⃣ Save attendance (COMPOSITE PRIMARY KEY SAFE)
+        # --------------------------------------------------
         for rec in data.attendance:
+
             cur.execute("""
                 INSERT INTO attendance_daily
-                (sbrn, subject, semester, section, class_date, attended)
-                VALUES (%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (sbrn, subject, semester, section, class_date)
+                (sbrn, subject_id, subject, semester, section, class_date, attended)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (sbrn, subject_id, semester, section, class_date)
                 DO UPDATE SET
                     attended = EXCLUDED.attended,
                     last_updated = CURRENT_TIMESTAMP
             """, (
                 rec.sbrn,
-                data.subject,     # subject now matches column
+                data.subject,   # subject_id
+                data.subject,   # subject (for readability)
                 data.semester,
                 data.section,
                 data.date,
@@ -1003,7 +1019,7 @@ def sync_students_from_cloud(
     }
 
 # ======================================================
-# 🔥 INCREMENTAL ATTENDANCE SYNC (CLOUD → DESKTOP SAFE)
+# 🔥 INCREMENTAL ATTENDANCE SYNC (DESKTOP-ALIGNED SAFE)
 # ======================================================
 
 @app.get("/sync/attendance")
@@ -1031,6 +1047,7 @@ def sync_attendance_from_cloud(
             cur.execute("""
                 SELECT
                     sbrn,
+                    subject_id,
                     subject,
                     semester,
                     section,
@@ -1046,6 +1063,7 @@ def sync_attendance_from_cloud(
             cur.execute("""
                 SELECT
                     sbrn,
+                    subject_id,
                     subject,
                     semester,
                     section,
@@ -1065,26 +1083,26 @@ def sync_attendance_from_cloud(
     conn.close()
 
     # --------------------------------------------------
-    # 🔥 JSON SAFE RESPONSE
+    # 🔥 JSON SAFE RESPONSE (DESKTOP COMPATIBLE)
     # --------------------------------------------------
 
     data = [
         {
             "sbrn": r[0],
-            "subject": r[1],  # 🔥 fixed (no subject_id)
-            "semester": r[2],
-            "section": r[3],
-            "class_date": r[4].strftime("%Y-%m-%d"),
-            "attended": r[5],
-            "last_updated": r[6].isoformat() if r[6] else None
+            "subject_id": r[1],   # 🔥 CRITICAL (desktop key)
+            "subject": r[2],      # optional (readability)
+            "semester": r[3],
+            "section": r[4],
+            "class_date": r[5].strftime("%Y-%m-%d"),
+            "attended": r[6],
+            "last_updated": r[7].isoformat() if r[7] else None
         }
         for r in rows
     ]
 
-    # 🔥 Critical: return latest sync timestamp
     latest_sync = None
     if rows:
-        latest_sync = rows[-1][6].isoformat()
+        latest_sync = rows[-1][7].isoformat()
 
     return {
         "status": "success",
@@ -1092,7 +1110,6 @@ def sync_attendance_from_cloud(
         "latest_sync": latest_sync,
         "records": data
     }
-
 
 # ======================================================
 # RESET TIMETABLE (DESKTOP → CLOUD)
