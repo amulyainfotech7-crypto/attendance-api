@@ -1019,6 +1019,71 @@ def sync_students_from_cloud(
     }
 
 # ======================================================
+# 🔥 SYNC ATTENDANCE (DESKTOP → CLOUD)  ← THIS WAS MISSING
+# ======================================================
+
+@app.post("/sync/attendance")
+def sync_attendance_from_desktop(records: list = Body(...)):
+
+    if not records:
+        return {"status": "no_data"}
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        for r in records:
+
+            # 🔒 Normalize
+            sbrn = r.get("sbrn")
+            subject_id = r.get("subject_id") or r.get("subject")
+            subject = r.get("subject") or subject_id
+            semester = r.get("semester")
+            section = r.get("section")
+            class_date = r.get("class_date")
+            attended = 1 if int(r.get("attended", 0)) >= 1 else 0
+
+            if not (sbrn and subject_id and semester and section and class_date):
+                continue
+
+            cur.execute("""
+                INSERT INTO attendance_daily
+                (sbrn, subject_id, subject, semester,
+                 section, class_date, attended, last_updated)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+                ON CONFLICT (sbrn, subject_id, semester, section, class_date)
+                DO UPDATE SET
+                    attended = EXCLUDED.attended,
+                    last_updated = CURRENT_TIMESTAMP
+            """, (
+                sbrn,
+                subject_id,
+                subject,
+                semester,
+                section,
+                class_date,
+                attended
+            ))
+
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    return {
+        "status": "success",
+        "rows_processed": len(records)
+    }
+
+
+
+
+# ======================================================
 # 🔥 INCREMENTAL ATTENDANCE SYNC (DESKTOP-ALIGNED SAFE)
 # ======================================================
 
