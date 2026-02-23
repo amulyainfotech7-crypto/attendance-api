@@ -1019,6 +1019,47 @@ def sync_students_from_cloud(
     }
 
 # ======================================================
+# 🔥 SYNC ATTENDANCE (DESKTOP → CLOUD)
+# ======================================================
+
+@app.post("/sync/attendance")
+def sync_attendance_to_cloud(records: list = Body(...)):
+
+    if not records:
+        return {"status": "no_data"}
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        execute_batch(cur, """
+            INSERT INTO attendance_daily
+            (sbrn, subject_id, subject, semester, section, class_date, attended, last_updated)
+            VALUES (%(sbrn)s, %(subject_id)s, %(subject)s,
+                    %(semester)s, %(section)s,
+                    %(class_date)s, %(attended)s,
+                    %(last_updated)s)
+            ON CONFLICT (sbrn, subject_id, semester, section, class_date)
+            DO UPDATE SET
+                attended = EXCLUDED.attended,
+                last_updated = EXCLUDED.last_updated
+            WHERE attendance_daily.last_updated < EXCLUDED.last_updated;
+        """, records)
+
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    return {"status": "success", "rows_processed": len(records)}
+
+
+
+# ======================================================
 # 🔥 INCREMENTAL ATTENDANCE SYNC (DESKTOP-ALIGNED SAFE)
 # ======================================================
 
