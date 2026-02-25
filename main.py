@@ -92,11 +92,19 @@ def startup():
             department TEXT,
             semester TEXT,
             section TEXT,
+
+            mobile_no TEXT,
+            father_name TEXT,
+            district TEXT,
+            photo TEXT,
+
             course TEXT,
             batch TEXT,
             admission_date TEXT,
             year_semester TEXT,
+
             academic_status TEXT DEFAULT 'REGULAR',
+
             last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             version INTEGER DEFAULT 1,
             sync_pending INTEGER DEFAULT 0,
@@ -116,6 +124,10 @@ def startup():
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS mobile_no TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS father_name TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS district TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS photo TEXT")
 
     # ======================================================
     # SUBJECTS
@@ -815,17 +827,20 @@ def sync_students(records: list = Body(...)):
             "semester": r.get("semester"),
             "section": r.get("section"),
             "department": r.get("department"),
+
+            "mobile_no": r.get("mobile_no"),
+            "father_name": r.get("father_name"),
+            "district": r.get("district"),
+            "photo": r.get("photo"),
+
             "course": r.get("course"),
             "batch": r.get("batch"),
             "admission_date": r.get("admission_date"),
             "year_semester": r.get("year_semester"),
             "academic_status": r.get("academic_status", "REGULAR"),
 
-            # 🔥 Sync engine
             "last_updated": r.get("last_updated") or datetime.utcnow(),
             "version": r.get("version", 1),
-
-            # 🔥 Soft delete
             "is_deleted": r.get("is_deleted", 0),
             "deleted_at": r.get("deleted_at"),
         })
@@ -844,11 +859,18 @@ def sync_students(records: list = Body(...)):
         semester,
         section,
         department,
+
+        mobile_no,
+        father_name,
+        district,
+        photo,
+
         course,
         batch,
         admission_date,
         year_semester,
         academic_status,
+
         last_updated,
         version,
         is_deleted,
@@ -861,11 +883,18 @@ def sync_students(records: list = Body(...)):
         %(semester)s,
         %(section)s,
         %(department)s,
+
+        %(mobile_no)s,
+        %(father_name)s,
+        %(district)s,
+        %(photo)s,
+
         %(course)s,
         %(batch)s,
         %(admission_date)s,
         %(year_semester)s,
         %(academic_status)s,
+
         %(last_updated)s,
         %(version)s,
         %(is_deleted)s,
@@ -877,11 +906,18 @@ def sync_students(records: list = Body(...)):
         semester = EXCLUDED.semester,
         section = EXCLUDED.section,
         department = EXCLUDED.department,
+
+        mobile_no = EXCLUDED.mobile_no,
+        father_name = EXCLUDED.father_name,
+        district = EXCLUDED.district,
+        photo = EXCLUDED.photo,
+
         course = EXCLUDED.course,
         batch = EXCLUDED.batch,
         admission_date = EXCLUDED.admission_date,
         year_semester = EXCLUDED.year_semester,
         academic_status = EXCLUDED.academic_status,
+
         last_updated = EXCLUDED.last_updated,
         version = EXCLUDED.version,
         is_deleted = EXCLUDED.is_deleted,
@@ -939,6 +975,12 @@ def sync_students_from_cloud(
                     semester,
                     section,
                     department,
+
+                    mobile_no,
+                    father_name,
+                    district,
+                    photo,
+
                     course,
                     batch,
                     admission_date,
@@ -961,6 +1003,12 @@ def sync_students_from_cloud(
                     semester,
                     section,
                     department,
+
+                    mobile_no,
+                    father_name,
+                    district,
+                    photo,
+
                     course,
                     batch,
                     admission_date,
@@ -993,15 +1041,21 @@ def sync_students_from_cloud(
             "semester": r[2],
             "section": r[3],
             "department": r[4],
-            "course": r[5],
-            "batch": r[6],
-            "admission_date": r[7],
-            "year_semester": r[8],
-            "academic_status": r[9],
-            "last_updated": r[10].isoformat() if r[10] else None,
-            "version": r[11],
-            "is_deleted": r[12],
-            "deleted_at": r[13].isoformat() if r[13] else None,
+
+            "mobile_no": r[5],
+            "father_name": r[6],
+            "district": r[7],
+            "photo": r[8],
+
+            "course": r[9],
+            "batch": r[10],
+            "admission_date": r[11],
+            "year_semester": r[12],
+            "academic_status": r[13],
+            "last_updated": r[14].isoformat() if r[14] else None,
+            "version": r[15],
+            "is_deleted": r[16],
+            "deleted_at": r[17].isoformat() if r[17] else None,
         }
         for r in rows
     ]
@@ -1009,7 +1063,7 @@ def sync_students_from_cloud(
     # 🔥 Return latest timestamp (critical for incremental sync)
     latest_sync = None
     if rows:
-        latest_sync = rows[-1][10].isoformat()
+        latest_sync = rows[-1][14].isoformat()
 
     return {
         "status": "success",
