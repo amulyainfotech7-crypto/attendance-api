@@ -921,8 +921,7 @@ def sync_students(records: list = Body(...)):
         last_updated = EXCLUDED.last_updated,
         version = EXCLUDED.version,
         is_deleted = EXCLUDED.is_deleted,
-        deleted_at = EXCLUDED.deleted_at
-    WHERE students.version < EXCLUDED.version;
+        deleted_at = EXCLUDED.deleted_at;
     """
 
     try:
