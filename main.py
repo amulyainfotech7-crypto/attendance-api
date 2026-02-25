@@ -819,7 +819,7 @@ def sync_students(records: list = Body(...)):
 
         # 🔒 Critical validation
         if not r.get("sbrn"):
-            continue   # skip invalid records safely
+            continue
 
         normalized.append({
             "sbrn": r.get("sbrn"),
@@ -832,6 +832,14 @@ def sync_students(records: list = Body(...)):
             "father_name": r.get("father_name"),
             "district": r.get("district"),
             "photo": r.get("photo"),
+
+            # 🔥 NEW PROFILE FIELDS
+            "dob": r.get("dob"),
+            "address": r.get("address"),
+            "state": r.get("state"),
+            "pincode": r.get("pincode"),
+            "gender": r.get("gender"),
+            "sr_no": r.get("sr_no"),
 
             "course": r.get("course"),
             "batch": r.get("batch"),
@@ -865,6 +873,13 @@ def sync_students(records: list = Body(...)):
         district,
         photo,
 
+        dob,
+        address,
+        state,
+        pincode,
+        gender,
+        sr_no,
+
         course,
         batch,
         admission_date,
@@ -889,6 +904,13 @@ def sync_students(records: list = Body(...)):
         %(district)s,
         %(photo)s,
 
+        %(dob)s,
+        %(address)s,
+        %(state)s,
+        %(pincode)s,
+        %(gender)s,
+        %(sr_no)s,
+
         %(course)s,
         %(batch)s,
         %(admission_date)s,
@@ -912,6 +934,13 @@ def sync_students(records: list = Body(...)):
         district = EXCLUDED.district,
         photo = EXCLUDED.photo,
 
+        dob = EXCLUDED.dob,
+        address = EXCLUDED.address,
+        state = EXCLUDED.state,
+        pincode = EXCLUDED.pincode,
+        gender = EXCLUDED.gender,
+        sr_no = EXCLUDED.sr_no,
+
         course = EXCLUDED.course,
         batch = EXCLUDED.batch,
         admission_date = EXCLUDED.admission_date,
@@ -921,7 +950,8 @@ def sync_students(records: list = Body(...)):
         last_updated = EXCLUDED.last_updated,
         version = EXCLUDED.version,
         is_deleted = EXCLUDED.is_deleted,
-        deleted_at = EXCLUDED.deleted_at;
+        deleted_at = EXCLUDED.deleted_at
+    WHERE students.version <= EXCLUDED.version;
     """
 
     try:
@@ -956,8 +986,43 @@ def sync_students_from_cloud(
     try:
 
         # --------------------------------------------------
-        # 🔒 Validate & parse timestamp safely
+        # 🔒 Validate timestamp safely
         # --------------------------------------------------
+        params = ()
+
+        base_query = """
+            SELECT
+                sbrn,
+                name,
+                semester,
+                section,
+                department,
+
+                mobile_no,
+                father_name,
+                district,
+                photo,
+
+                dob,
+                address,
+                state,
+                pincode,
+                gender,
+                sr_no,
+
+                course,
+                batch,
+                admission_date,
+                year_semester,
+                academic_status,
+
+                last_updated,
+                version,
+                is_deleted,
+                deleted_at
+            FROM students
+        """
+
         if since:
             try:
                 parsed_since = datetime.fromisoformat(since)
@@ -967,60 +1032,12 @@ def sync_students_from_cloud(
                     detail="Invalid 'since' timestamp format. Use ISO format."
                 )
 
-            cur.execute("""
-                SELECT
-                    sbrn,
-                    name,
-                    semester,
-                    section,
-                    department,
+            base_query += " WHERE last_updated > %s"
+            params = (parsed_since,)
 
-                    mobile_no,
-                    father_name,
-                    district,
-                    photo,
+        base_query += " ORDER BY last_updated ASC"
 
-                    course,
-                    batch,
-                    admission_date,
-                    year_semester,
-                    academic_status,
-                    last_updated,
-                    version,
-                    is_deleted,
-                    deleted_at
-                FROM students
-                WHERE last_updated > %s
-                ORDER BY last_updated ASC
-            """, (parsed_since,))
-        else:
-            # 🔹 First full sync
-            cur.execute("""
-                SELECT
-                    sbrn,
-                    name,
-                    semester,
-                    section,
-                    department,
-
-                    mobile_no,
-                    father_name,
-                    district,
-                    photo,
-
-                    course,
-                    batch,
-                    admission_date,
-                    year_semester,
-                    academic_status,
-                    last_updated,
-                    version,
-                    is_deleted,
-                    deleted_at
-                FROM students
-                ORDER BY last_updated ASC
-            """)
-
+        cur.execute(base_query, params)
         rows = cur.fetchall()
 
     except Exception as e:
@@ -1030,11 +1047,21 @@ def sync_students_from_cloud(
     conn.close()
 
     # --------------------------------------------------
-    # 🔥 JSON SAFE RESPONSE
+    # 🔥 Build JSON Response Safely
     # --------------------------------------------------
 
-    data = [
-        {
+    records = []
+    latest_sync = None
+
+    for r in rows:
+
+        last_updated_val = r[20]
+        deleted_at_val = r[23]
+
+        if last_updated_val:
+            latest_sync = last_updated_val.isoformat()
+
+        records.append({
             "sbrn": r[0],
             "name": r[1],
             "semester": r[2],
@@ -1046,29 +1073,30 @@ def sync_students_from_cloud(
             "district": r[7],
             "photo": r[8],
 
-            "course": r[9],
-            "batch": r[10],
-            "admission_date": r[11],
-            "year_semester": r[12],
-            "academic_status": r[13],
-            "last_updated": r[14].isoformat() if r[14] else None,
-            "version": r[15],
-            "is_deleted": r[16],
-            "deleted_at": r[17].isoformat() if r[17] else None,
-        }
-        for r in rows
-    ]
+            "dob": r[9],
+            "address": r[10],
+            "state": r[11],
+            "pincode": r[12],
+            "gender": r[13],
+            "sr_no": r[14],
 
-    # 🔥 Return latest timestamp (critical for incremental sync)
-    latest_sync = None
-    if rows:
-        latest_sync = rows[-1][14].isoformat()
+            "course": r[15],
+            "batch": r[16],
+            "admission_date": r[17],
+            "year_semester": r[18],
+            "academic_status": r[19],
+
+            "last_updated": last_updated_val.isoformat() if last_updated_val else None,
+            "version": r[21],
+            "is_deleted": r[22],
+            "deleted_at": deleted_at_val.isoformat() if deleted_at_val else None,
+        })
 
     return {
         "status": "success",
-        "count": len(data),
+        "count": len(records),
         "latest_sync": latest_sync,
-        "records": data
+        "records": records
     }
 
 # ======================================================
