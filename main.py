@@ -9,6 +9,8 @@ from typing import Optional
 import hashlib
 import base64
 from datetime import datetime
+import calendar
+from datetime import date as dt_date
 
 app = FastAPI()
 
@@ -59,6 +61,62 @@ def verify_password(password: str, stored_hash: str) -> bool:
 
     except Exception:
         return False
+
+# ======================================================
+# 🔥 WORKING DAY CHECK (CLOUD AUTHORITATIVE)
+# ======================================================
+
+def is_working_day(check_date: dt_date, department: str, semester: str):
+
+    # ❌ Sunday
+    if check_date.weekday() == 6:
+        return False
+
+    # ❌ 2nd Saturday
+    if check_date.weekday() == 5:
+        saturday_count = sum(
+            1 for d in range(1, check_date.day + 1)
+            if calendar.weekday(check_date.year, check_date.month, d) == 5
+        )
+        if saturday_count == 2:
+            return False
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    # ❌ Semester date range check
+    cur.execute("""
+        SELECT start_date, end_date
+        FROM semester_dates
+        WHERE LOWER(department)=LOWER(%s)
+          AND LOWER(semester)=LOWER(%s)
+    """, (department, semester))
+
+    row = cur.fetchone()
+
+    if row:
+        start_date = row[0]
+        end_date   = row[1]
+
+        if not (start_date <= check_date <= end_date):
+            conn.close()
+            return False
+
+    # ❌ Gazetted holiday check
+    cur.execute(
+        "SELECT 1 FROM holidays WHERE date=%s",
+        (check_date,)
+    )
+
+    if cur.fetchone():
+        conn.close()
+        return False
+
+    conn.close()
+    return True
+
+
+
 
 # ======================================================
 # STARTUP – CREATE TABLES (FINAL PRODUCTION SAFE VERSION)
@@ -165,6 +223,29 @@ def startup():
         )
     """)
 
+
+    # ======================================================
+    # SEMESTER DATES
+    # ======================================================
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS semester_dates(
+            department TEXT,
+            semester TEXT,
+            start_date DATE,
+            end_date DATE,
+            PRIMARY KEY (department, semester)
+        )
+    """)
+
+    # ======================================================
+    # HOLIDAYS
+    # ======================================================
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS holidays(
+            date DATE PRIMARY KEY,
+            description TEXT
+        )
+    """)
     # ======================================================
     # AUTO-HEAL SUBJECTS FROM TIMETABLE
     # ======================================================
@@ -532,9 +613,16 @@ def get_timetable(department: str, semester: str, day: str):
 def get_subjects_by_date(department: str, semester: str, date: str):
 
     try:
-        parsed_date = datetime.strptime(date, "%Y-%m-%d")
+        # Convert to proper date object
+        parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
+
+        # 🔥 BLOCK SUNDAY / 2ND SATURDAY / HOLIDAY / OUTSIDE SEMESTER
+        if not is_working_day(parsed_date, department, semester):
+            print("DEBUG: Holiday or Non-working day → No subjects")
+            return []
+
         weekday_short = parsed_date.strftime("%a").strip()
-        print("DEBUG weekday:", weekday_short)
+
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format")
 
@@ -678,7 +766,15 @@ def mark_attendance(data: AttendanceRequest):
         # --------------------------------------------------
         # 1️⃣ Validate date
         # --------------------------------------------------
-        class_date = datetime.strptime(data.date, "%Y-%m-%d")
+        class_date = datetime.strptime(data.date, "%Y-%m-%d").date()
+
+        # 🔥 BLOCK ATTENDANCE ON HOLIDAYS
+        if not is_working_day(class_date, data.department, data.semester):
+            return {
+                "status": "holiday",
+                "message": "Attendance cannot be marked on holidays"
+            }
+
         day_short = class_date.strftime("%a")
 
         section_value = (data.section or "").lower()
