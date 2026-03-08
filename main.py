@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from database import connect_db
@@ -13,6 +13,12 @@ import calendar
 from datetime import date as dt_date
 
 app = FastAPI()
+
+# ======================================================
+# WEBSOCKET CLIENT REGISTRY
+# ======================================================
+
+connected_clients = []
 
 # ======================================================
 # MIDDLEWARE
@@ -35,6 +41,49 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ======================================================
+# REALTIME WEBSOCKET CHANNEL
+# ======================================================
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+
+    await ws.accept()
+    connected_clients.append(ws)
+
+    print("🔌 WebSocket client connected")
+
+    try:
+        while True:
+            await ws.receive_text()
+
+    except Exception:
+        print("⚠ WebSocket client disconnected")
+
+    finally:
+        if ws in connected_clients:
+            connected_clients.remove(ws)
+
+
+# ======================================================
+# REALTIME BROADCAST
+# ======================================================
+
+import asyncio
+
+async def broadcast_event(table_name):
+
+    for client in connected_clients:
+        try:
+            await client.send_json({
+                "table": table_name
+            })
+        except Exception:
+            pass
+
+
 
 # ======================================================
 # PASSWORD VERIFY
@@ -1054,6 +1103,9 @@ def sync_students(records: list = Body(...)):
         execute_batch(cur, query, normalized)
         conn.commit()
 
+        import asyncio
+        asyncio.create_task(broadcast_event("students"))
+
     except Exception as e:
         conn.rollback()
         conn.close()
@@ -1224,7 +1276,10 @@ def sync_attendance_to_cloud(records: list = Body(...)):
         """, records)
 
         conn.commit()
+        import asyncio
+        asyncio.create_task(broadcast_event("attendance_daily"))
 
+        
     except Exception as e:
         conn.rollback()
         conn.close()
