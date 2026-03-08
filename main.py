@@ -518,56 +518,6 @@ def get_semesters(department: str):
 
     return [r[0] for r in rows]
 
-# ======================================================
-# UNIVERSAL SYNC (LOCAL → CLOUD)
-# ======================================================
-
-@app.post("/sync-generic/{table_name}")
-def universal_sync_upload(table_name: str, records: list = Body(...)):
-
-    if table_name not in SYNC_TABLES:
-        raise HTTPException(status_code=400, detail="Invalid table")
-
-    if not records:
-        return {"status": "no_data"}
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    try:
-
-        columns = records[0].keys()
-
-        cols = ",".join(columns)
-        vals = ",".join([f"%({c})s" for c in columns])
-
-        update_cols = ",".join(
-            [f"{c}=EXCLUDED.{c}" for c in columns if c not in ["sbrn"]]
-        )
-
-        query = f"""
-        INSERT INTO {table_name} ({cols})
-        VALUES ({vals})
-        ON CONFLICT DO UPDATE SET
-        {update_cols};
-        """
-
-        execute_batch(cur, query, records)
-
-        conn.commit()
-
-        import asyncio
-        asyncio.create_task(broadcast_event(table_name))
-
-    except Exception as e:
-        conn.rollback()
-        conn.close()
-        raise HTTPException(status_code=500, detail=str(e))
-
-    conn.close()
-
-    return {"status": "success", "rows": len(records)}
-
 
 # ======================================================
 # 🔥 SYNC TIMETABLE (LOCAL → CLOUD)
@@ -1438,7 +1388,8 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         query = f"""
         INSERT INTO {table_name} ({cols})
         VALUES ({vals})
-        ON CONFLICT DO UPDATE SET
+        ON CONFLICT (sbrn)
+        DO UPDATE SET
         {update_cols};
         """
 
@@ -1447,7 +1398,10 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         conn.commit()
 
         import asyncio
-        asyncio.create_task(broadcast_event(table_name))
+        try:
+            asyncio.create_task(broadcast_event(table_name))
+        except RuntimeError:
+            pass
 
     except Exception as e:
         conn.rollback()
@@ -1721,3 +1675,35 @@ def full_reset_cloud(secret: str):
     conn.close()
 
     return {"status": "cloud_reset_complete"}
+@app.get("/sync-all")
+def sync_all():
+
+    tables = get_sync_tables()
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    result = {}
+
+    for table in tables:
+
+        try:
+            cur.execute(f"SELECT * FROM {table}")
+
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+
+            result[table] = [
+                dict(zip(cols, r))
+                for r in rows
+            ]
+
+        except Exception:
+            result[table] = []
+
+    conn.close()
+
+    return {
+        "status": "success",
+        "tables": result
+    }
