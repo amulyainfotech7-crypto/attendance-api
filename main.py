@@ -585,71 +585,6 @@ def sync_timetable(records: list = Body(...)):
 
     return {"status": "success", "rows_processed": len(records)}
 
-
-# ======================================================
-# UNIVERSAL SYNC (CLOUD → DESKTOP)
-# ======================================================
-
-@app.get("/sync-generic/{table_name}")
-def universal_sync_download(
-    table_name: str,
-    since: Optional[str] = Query(default=None)
-):
-
-    if table_name not in SYNC_TABLES:
-        raise HTTPException(status_code=400, detail="Invalid table")
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    try:
-
-        if since:
-            parsed = datetime.fromisoformat(since)
-
-            cur.execute(f"""
-                SELECT *
-                FROM {table_name}
-                WHERE last_updated > %s
-                ORDER BY last_updated ASC
-            """, (parsed,))
-
-        else:
-
-            cur.execute(f"""
-                SELECT *
-                FROM {table_name}
-                ORDER BY last_updated ASC
-            """)
-
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-
-    except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=500, detail=str(e))
-
-    conn.close()
-
-    records = []
-    latest_sync = None
-
-    for row in rows:
-
-        record = dict(zip(columns, row))
-
-        if record.get("last_updated"):
-            latest_sync = record["last_updated"].isoformat()
-            record["last_updated"] = latest_sync
-
-        records.append(record)
-
-    return {
-        "status": "success",
-        "count": len(records),
-        "latest_sync": latest_sync,
-        "records": records
-    }
 # ======================================================
 # 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL SAFE)
 # ======================================================
@@ -1447,8 +1382,8 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
                 ORDER BY last_updated ASC
             """)
 
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
+        rows = cur.fetchall() or []
+        columns = [desc[0] for desc in cur.description] if cur.description else []
 
     except Exception as e:
         conn.close()
@@ -1675,35 +1610,3 @@ def full_reset_cloud(secret: str):
     conn.close()
 
     return {"status": "cloud_reset_complete"}
-@app.get("/sync-all")
-def sync_all():
-
-    tables = get_sync_tables()
-
-    conn = connect_db()
-    cur = conn.cursor()
-
-    result = {}
-
-    for table in tables:
-
-        try:
-            cur.execute(f"SELECT * FROM {table}")
-
-            rows = cur.fetchall()
-            cols = [d[0] for d in cur.description]
-
-            result[table] = [
-                dict(zip(cols, r))
-                for r in rows
-            ]
-
-        except Exception:
-            result[table] = []
-
-    conn.close()
-
-    return {
-        "status": "success",
-        "tables": result
-    }
