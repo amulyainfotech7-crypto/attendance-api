@@ -1349,7 +1349,7 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
 
 
 # ======================================================
-# UNIVERSAL SYNC DOWNLOAD
+# UNIVERSAL SYNC DOWNLOAD (SAFE FOR ALL TABLES)
 # ======================================================
 
 @app.get("/sync-generic/{table_name}")
@@ -1365,8 +1365,30 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
 
     try:
 
-        if since:
-            parsed = datetime.fromisoformat(since)
+        # --------------------------------------------------
+        # Detect if table has last_updated column
+        # --------------------------------------------------
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name=%s
+        """, (table_name,))
+
+        columns_in_table = [r[0] for r in cur.fetchall()]
+        has_last_updated = "last_updated" in columns_in_table
+
+        # --------------------------------------------------
+        # Choose safe query
+        # --------------------------------------------------
+        if since and has_last_updated:
+
+            try:
+                parsed = datetime.fromisoformat(since)
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid 'since' timestamp format"
+                )
 
             cur.execute(f"""
                 SELECT *
@@ -1374,7 +1396,8 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
                 WHERE last_updated > %s
                 ORDER BY last_updated ASC
             """, (parsed,))
-        else:
+
+        elif has_last_updated:
 
             cur.execute(f"""
                 SELECT *
@@ -1382,8 +1405,17 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
                 ORDER BY last_updated ASC
             """)
 
+        else:
+
+            # tables without last_updated
+            cur.execute(f"""
+                SELECT *
+                FROM {table_name}
+                ORDER BY 1
+            """)
+
         rows = cur.fetchall() or []
-        columns = [desc[0] for desc in cur.description] if cur.description else []
+        columns = [d[0] for d in cur.description] if cur.description else []
 
     except Exception as e:
         conn.close()
@@ -1398,14 +1430,21 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
 
         record = dict(zip(columns, row))
 
-        if record.get("last_updated"):
-            latest_sync = record["last_updated"].isoformat()
-            record["last_updated"] = latest_sync
+        # --------------------------------------------------
+        # Convert datetime to ISO safely
+        # --------------------------------------------------
+        for k, v in record.items():
+            if hasattr(v, "isoformat"):
+                record[k] = v.isoformat()
+
+        if "last_updated" in record:
+            latest_sync = record["last_updated"]
 
         records.append(record)
 
     return {
         "status": "success",
+        "table": table_name,
         "count": len(records),
         "latest_sync": latest_sync,
         "records": records
