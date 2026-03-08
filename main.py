@@ -23,6 +23,33 @@ connected_clients = []
 # ======================================================
 # MIDDLEWARE
 # ======================================================
+# ======================================================
+# AUTO DETECT SYNC TABLES
+# ======================================================
+
+def get_sync_tables():
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT tablename
+        FROM pg_tables
+        WHERE schemaname = 'public'
+    """)
+
+    tables = [r[0] for r in cur.fetchall()]
+
+    conn.close()
+
+    # tables we NEVER expose
+    excluded = {
+        "users",
+        "pg_stat_statements"
+    }
+
+    return [t for t in tables if t not in excluded]
+
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
@@ -75,15 +102,30 @@ import asyncio
 
 async def broadcast_event(table_name):
 
+    disconnected = []
+
     for client in connected_clients:
         try:
-            await client.send_json({
-                "table": table_name
-            })
+            await client.send_json({"table": table_name})
         except Exception:
-            pass
+            disconnected.append(client)
 
+    for d in disconnected:
+        if d in connected_clients:
+            connected_clients.remove(d)
 
+# ======================================================
+# UNIVERSAL SYNC TABLE LIST
+# ======================================================
+
+SYNC_TABLES = {
+    "students",
+    "attendance_daily",
+    "timetable_slots",
+    "subjects",
+    "semester_dates",
+    "holidays"
+}
 
 # ======================================================
 # PASSWORD VERIFY
@@ -477,6 +519,57 @@ def get_semesters(department: str):
     return [r[0] for r in rows]
 
 # ======================================================
+# UNIVERSAL SYNC (LOCAL → CLOUD)
+# ======================================================
+
+@app.post("/sync-generic/{table_name}")
+def universal_sync_upload(table_name: str, records: list = Body(...)):
+
+    if table_name not in SYNC_TABLES:
+        raise HTTPException(status_code=400, detail="Invalid table")
+
+    if not records:
+        return {"status": "no_data"}
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        columns = records[0].keys()
+
+        cols = ",".join(columns)
+        vals = ",".join([f"%({c})s" for c in columns])
+
+        update_cols = ",".join(
+            [f"{c}=EXCLUDED.{c}" for c in columns if c not in ["sbrn"]]
+        )
+
+        query = f"""
+        INSERT INTO {table_name} ({cols})
+        VALUES ({vals})
+        ON CONFLICT DO UPDATE SET
+        {update_cols};
+        """
+
+        execute_batch(cur, query, records)
+
+        conn.commit()
+
+        import asyncio
+        asyncio.create_task(broadcast_event(table_name))
+
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    return {"status": "success", "rows": len(records)}
+
+
+# ======================================================
 # 🔥 SYNC TIMETABLE (LOCAL → CLOUD)
 # ======================================================
 
@@ -543,7 +636,70 @@ def sync_timetable(records: list = Body(...)):
     return {"status": "success", "rows_processed": len(records)}
 
 
+# ======================================================
+# UNIVERSAL SYNC (CLOUD → DESKTOP)
+# ======================================================
 
+@app.get("/sync-generic/{table_name}")
+def universal_sync_download(
+    table_name: str,
+    since: Optional[str] = Query(default=None)
+):
+
+    if table_name not in SYNC_TABLES:
+        raise HTTPException(status_code=400, detail="Invalid table")
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        if since:
+            parsed = datetime.fromisoformat(since)
+
+            cur.execute(f"""
+                SELECT *
+                FROM {table_name}
+                WHERE last_updated > %s
+                ORDER BY last_updated ASC
+            """, (parsed,))
+
+        else:
+
+            cur.execute(f"""
+                SELECT *
+                FROM {table_name}
+                ORDER BY last_updated ASC
+            """)
+
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    records = []
+    latest_sync = None
+
+    for row in rows:
+
+        record = dict(zip(columns, row))
+
+        if record.get("last_updated"):
+            latest_sync = record["last_updated"].isoformat()
+            record["last_updated"] = latest_sync
+
+        records.append(record)
+
+    return {
+        "status": "success",
+        "count": len(records),
+        "latest_sync": latest_sync,
+        "records": records
+    }
 # ======================================================
 # 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL SAFE)
 # ======================================================
@@ -896,6 +1052,8 @@ def mark_attendance(data: AttendanceRequest):
             ))
 
         conn.commit()
+        import asyncio
+        asyncio.create_task(broadcast_event("attendance_daily"))
 
     except Exception as e:
         conn.rollback()
@@ -1247,6 +1405,124 @@ def sync_students_from_cloud(
         "records": records
     }
 
+
+# ======================================================
+# UNIVERSAL SYNC UPLOAD
+# ======================================================
+
+@app.post("/sync-generic/{table_name}")
+def universal_sync_upload(table_name: str, records: list = Body(...)):
+
+    allowed_tables = get_sync_tables()
+
+    if table_name not in allowed_tables:
+        raise HTTPException(status_code=400, detail="Invalid table")
+
+    if not records:
+        return {"status": "no_data"}
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        columns = records[0].keys()
+
+        cols = ",".join(columns)
+        vals = ",".join([f"%({c})s" for c in columns])
+
+        update_cols = ",".join(
+            [f"{c}=EXCLUDED.{c}" for c in columns if c != "id"]
+        )
+
+        query = f"""
+        INSERT INTO {table_name} ({cols})
+        VALUES ({vals})
+        ON CONFLICT DO UPDATE SET
+        {update_cols};
+        """
+
+        execute_batch(cur, query, records)
+
+        conn.commit()
+
+        import asyncio
+        asyncio.create_task(broadcast_event(table_name))
+
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    return {"status": "success", "rows": len(records)}
+
+
+# ======================================================
+# UNIVERSAL SYNC DOWNLOAD
+# ======================================================
+
+@app.get("/sync-generic/{table_name}")
+def universal_sync_download(table_name: str, since: Optional[str] = None):
+
+    allowed_tables = get_sync_tables()
+
+    if table_name not in allowed_tables:
+        raise HTTPException(status_code=400, detail="Invalid table")
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        if since:
+            parsed = datetime.fromisoformat(since)
+
+            cur.execute(f"""
+                SELECT *
+                FROM {table_name}
+                WHERE last_updated > %s
+                ORDER BY last_updated ASC
+            """, (parsed,))
+        else:
+
+            cur.execute(f"""
+                SELECT *
+                FROM {table_name}
+                ORDER BY last_updated ASC
+            """)
+
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    records = []
+    latest_sync = None
+
+    for row in rows:
+
+        record = dict(zip(columns, row))
+
+        if record.get("last_updated"):
+            latest_sync = record["last_updated"].isoformat()
+            record["last_updated"] = latest_sync
+
+        records.append(record)
+
+    return {
+        "status": "success",
+        "count": len(records),
+        "latest_sync": latest_sync,
+        "records": records
+    }
+
+
 # ======================================================
 # 🔥 SYNC ATTENDANCE (DESKTOP → CLOUD)
 # ======================================================
@@ -1279,7 +1555,7 @@ def sync_attendance_to_cloud(records: list = Body(...)):
         import asyncio
         asyncio.create_task(broadcast_event("attendance_daily"))
 
-        
+
     except Exception as e:
         conn.rollback()
         conn.close()
@@ -1411,7 +1687,11 @@ def reset_timetable_from_desktop(department: str, semester: str):
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.delete("/sync/full-reset")
-def full_reset_cloud():
+def full_reset_cloud(secret: str):
+
+    # 🔐 SECURITY CHECK
+    if secret != "ADMIN_RESET_123":
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
     conn = connect_db()
     cur = conn.cursor()
