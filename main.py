@@ -1610,3 +1610,90 @@ def full_reset_cloud(secret: str):
     conn.close()
 
     return {"status": "cloud_reset_complete"}
+
+# ======================================================
+# 🚀 ENTERPRISE FULL DATABASE SYNC (ALL TABLES)
+# ======================================================
+
+@app.get("/sync-all")
+def sync_all_tables():
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        # ---------------------------------------------
+        # Get all tables automatically
+        # ---------------------------------------------
+        cur.execute("""
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname='public'
+        """)
+
+        tables = [r[0] for r in cur.fetchall()]
+
+        # ---------------------------------------------
+        # Tables we NEVER expose
+        # ---------------------------------------------
+        excluded = {
+            "users",
+            "pg_stat_statements"
+        }
+
+        tables = [t for t in tables if t not in excluded]
+
+        result = {}
+
+        # ---------------------------------------------
+        # Export each table
+        # ---------------------------------------------
+        for table in tables:
+
+            try:
+
+                cur.execute(f"""
+                    SELECT *
+                    FROM {table}
+                    ORDER BY 1
+                """)
+
+                rows = cur.fetchall() or []
+
+                columns = [
+                    d[0] for d in cur.description
+                ] if cur.description else []
+
+                records = []
+
+                for row in rows:
+
+                    rec = dict(zip(columns, row))
+
+                    # convert datetime → ISO
+                    for k, v in rec.items():
+                        if hasattr(v, "isoformat"):
+                            rec[k] = v.isoformat()
+
+                    records.append(rec)
+
+                result[table] = records
+
+            except Exception as e:
+
+                print(f"⚠ Skip table {table}: {e}")
+                result[table] = []
+
+        conn.close()
+
+        return {
+            "status": "success",
+            "table_count": len(result),
+            "tables": result
+        }
+
+    except Exception as e:
+
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
