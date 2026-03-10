@@ -1309,26 +1309,21 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
     conn = connect_db()
     cur = conn.cursor()
 
-    # --------------------------------------------------
-    # PRIMARY KEY MAP
-    # --------------------------------------------------
+    # Correct conflict keys
     pk_map = {
-        "students": "sbrn",
+        "students": "(sbrn)",
         "subjects": "(subject_id, semester, department)",
-        "timetable_slots": "id",
         "attendance_daily": "(sbrn, subject_id, semester, section, class_date)",
-        "holidays": "date",
-        "semester_dates": "(department, semester)"
+        "semester_dates": "(department, semester)",
+        "holidays": "(date)",
+        "timetable_slots": "(id)"
     }
 
     conflict_key = pk_map.get(table_name)
 
     if not conflict_key:
         conn.close()
-        raise HTTPException(
-            status_code=400,
-            detail=f"No primary key defined for {table_name}"
-        )
+        raise HTTPException(status_code=400, detail=f"No PK for {table_name}")
 
     try:
 
@@ -1353,13 +1348,8 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
 
         conn.commit()
 
-        import asyncio
-        try:
-            asyncio.create_task(broadcast_event(table_name))
-        except RuntimeError:
-            pass
-
     except Exception as e:
+
         conn.rollback()
         conn.close()
         raise HTTPException(status_code=500, detail=str(e))
