@@ -261,21 +261,29 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 # ======================================================
-# KEEP RENDER SERVICE ALIVE
+# KEEP RENDER SERVICE ALIVE (SMART VERSION)
 # ======================================================
 
 def keep_server_awake():
 
-    url = "https://attendance-api-67cs.onrender.com/health"
+    urls = [
+        "https://attendance-api-67cs.onrender.com/health",
+        "https://attendance-api-67cs.onrender.com/sync-all"
+    ]
 
     while True:
-        try:
-            requests.get(url, timeout=10)
-            print("💓 Keep-alive ping sent")
-        except Exception as e:
-            print("⚠ Keep-alive failed:", e)
 
-        time.sleep(600)  # every 10 minutes
+        for url in urls:
+
+            try:
+                requests.get(url, timeout=10)
+                print(f"💓 Keep-alive ping OK → {url}")
+
+            except Exception as e:
+                print(f"⚠ Keep-alive failed → {url} : {e}")
+
+        # wait 10 minutes
+        time.sleep(600)
 
 
 # ======================================================
