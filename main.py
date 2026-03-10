@@ -71,6 +71,114 @@ def health():
 
 
 # ======================================================
+# AUTO SCHEMA MIGRATION (DESKTOP → CLOUD)
+# ======================================================
+
+@app.post("/sync-schema")
+def sync_schema(schema: dict = Body(...)):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    created_tables = []
+    added_columns = []
+
+    try:
+
+        for table_name, columns in schema.items():
+
+            # -------------------------------
+            # Check if table exists
+            # -------------------------------
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_name=%s
+                )
+            """, (table_name,))
+
+            table_exists = cur.fetchone()[0]
+
+            # -------------------------------
+            # Create table if missing
+            # -------------------------------
+            if not table_exists:
+
+                col_defs = []
+
+                for col, col_type in columns.items():
+
+                    pg_type = {
+                        "TEXT": "TEXT",
+                        "INTEGER": "INTEGER",
+                        "REAL": "DOUBLE PRECISION",
+                        "BLOB": "BYTEA"
+                    }.get(col_type.upper(), "TEXT")
+
+                    col_defs.append(f"{col} {pg_type}")
+
+                create_sql = f"""
+                CREATE TABLE "{table_name}" (
+                    {",".join(col_defs)}
+                );
+                """
+
+                cur.execute(create_sql)
+
+                created_tables.append(table_name)
+                continue
+
+            # -------------------------------
+            # Fetch existing columns
+            # -------------------------------
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name=%s
+            """, (table_name,))
+
+            existing_cols = {r[0] for r in cur.fetchall()}
+
+            # -------------------------------
+            # Add missing columns
+            # -------------------------------
+            for col, col_type in columns.items():
+
+                if col not in existing_cols:
+
+                    pg_type = {
+                        "TEXT": "TEXT",
+                        "INTEGER": "INTEGER",
+                        "REAL": "DOUBLE PRECISION",
+                        "BLOB": "BYTEA"
+                    }.get(col_type.upper(), "TEXT")
+
+                    cur.execute(f"""
+                        ALTER TABLE "{table_name}"
+                        ADD COLUMN "{col}" {pg_type}
+                    """)
+
+                    added_columns.append(f"{table_name}.{col}")
+
+        conn.commit()
+
+    except Exception as e:
+
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    conn.close()
+
+    return {
+        "status": "success",
+        "tables_created": created_tables,
+        "columns_added": added_columns
+    }
+
+
+# ======================================================
 # REALTIME WEBSOCKET CHANNEL
 # ======================================================
 
@@ -695,6 +803,7 @@ def get_timetable(department: str, semester: str, day: str):
         for r in rows
     ]
 
+
 # ======================================================
 # SUBJECTS BY DATE
 # ======================================================
@@ -1291,8 +1400,9 @@ def sync_students_from_cloud(
     }
 
 
+
 # ======================================================
-# UNIVERSAL SYNC UPLOAD
+# UNIVERSAL SYNC UPLOAD (SAFE + AUTO COLUMN FILTER)
 # ======================================================
 
 @app.post("/sync-generic/{table_name}")
@@ -1309,14 +1419,16 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
     conn = connect_db()
     cur = conn.cursor()
 
-    # Correct conflict keys
+    # --------------------------------------------------
+    # PRIMARY KEY MAP
+    # --------------------------------------------------
     pk_map = {
         "students": "(sbrn)",
         "subjects": "(subject_id, semester, department)",
         "attendance_daily": "(sbrn, subject_id, semester, section, class_date)",
         "semester_dates": "(department, semester)",
         "holidays": "(date)",
-        "timetable_slots": "(id)"
+        "timetable_slots": "(department, semester, section, day, period_no)"
     }
 
     conflict_key = pk_map.get(table_name)
@@ -1327,7 +1439,25 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
 
     try:
 
-        columns = records[0].keys()
+        # --------------------------------------------------
+        # Detect valid DB columns
+        # --------------------------------------------------
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name=%s
+        """, (table_name,))
+
+        valid_columns = {r[0] for r in cur.fetchall()}
+
+        # --------------------------------------------------
+        # Filter only valid columns from client data
+        # --------------------------------------------------
+        columns = [c for c in records[0].keys() if c in valid_columns]
+
+        if not columns:
+            conn.close()
+            raise HTTPException(status_code=400, detail="No valid columns")
 
         cols = ",".join(columns)
         vals = ",".join([f"%({c})s" for c in columns])
@@ -1337,7 +1467,7 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         )
 
         query = f"""
-        INSERT INTO {table_name} ({cols})
+        INSERT INTO "{table_name}" ({cols})
         VALUES ({vals})
         ON CONFLICT {conflict_key}
         DO UPDATE SET
@@ -1356,11 +1486,14 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
 
     conn.close()
 
-    return {"status": "success", "rows": len(records)}
+    return {
+        "status": "success",
+        "rows": len(records)
+    }
 
 
 # ======================================================
-# UNIVERSAL SYNC DOWNLOAD (SAFE FOR ALL TABLES)
+# UNIVERSAL SYNC DOWNLOAD (SAFE + FAST)
 # ======================================================
 
 @app.get("/sync-generic/{table_name}")
@@ -1388,9 +1521,13 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
         columns_in_table = [r[0] for r in cur.fetchall()]
         has_last_updated = "last_updated" in columns_in_table
 
+        params = ()
+
         # --------------------------------------------------
-        # Choose safe query
+        # Build safe query
         # --------------------------------------------------
+        base_query = f'SELECT * FROM "{table_name}"'
+
         if since and has_last_updated:
 
             try:
@@ -1401,29 +1538,15 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
                     detail="Invalid 'since' timestamp format"
                 )
 
-            cur.execute(f"""
-                SELECT *
-                FROM {table_name}
-                WHERE last_updated > %s
-                ORDER BY last_updated ASC
-            """, (parsed,))
+            base_query += " WHERE last_updated > %s"
+            params = (parsed,)
 
-        elif has_last_updated:
-
-            cur.execute(f"""
-                SELECT *
-                FROM {table_name}
-                ORDER BY last_updated ASC
-            """)
-
+        if has_last_updated:
+            base_query += " ORDER BY last_updated ASC"
         else:
+            base_query += " ORDER BY 1"
 
-            # tables without last_updated
-            cur.execute(f"""
-                SELECT *
-                FROM {table_name}
-                ORDER BY 1
-            """)
+        cur.execute(base_query, params)
 
         rows = cur.fetchall() or []
         columns = [d[0] for d in cur.description] if cur.description else []
@@ -1442,7 +1565,7 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
         record = dict(zip(columns, row))
 
         # --------------------------------------------------
-        # Convert datetime to ISO safely
+        # Convert datetime → ISO format
         # --------------------------------------------------
         for k, v in record.items():
             if hasattr(v, "isoformat"):
