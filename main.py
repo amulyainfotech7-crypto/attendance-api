@@ -20,6 +20,30 @@ app = FastAPI()
 
 connected_clients = []
 
+
+# ======================================================
+# REALTIME BROADCAST EVENT
+# ======================================================
+
+import asyncio
+
+async def broadcast_event(table_name: str):
+
+    disconnected = []
+
+    for client in connected_clients:
+        try:
+            await client.send_json({
+                "event": "table_updated",
+                "table": table_name
+            })
+        except Exception:
+            disconnected.append(client)
+
+    for d in disconnected:
+        if d in connected_clients:
+            connected_clients.remove(d)
+
 # ======================================================
 # MIDDLEWARE
 # ======================================================
@@ -71,11 +95,14 @@ def health():
 
 
 # ======================================================
-# AUTO SCHEMA MIGRATION (DESKTOP → CLOUD)
+# AUTO SCHEMA MIGRATION (DESKTOP → CLOUD) — FINAL SAFE
 # ======================================================
 
 @app.post("/sync-schema")
 def sync_schema(schema: dict = Body(...)):
+
+    if not schema or not isinstance(schema, dict):
+        raise HTTPException(status_code=400, detail="Invalid schema payload")
 
     conn = connect_db()
     cur = conn.cursor()
@@ -87,79 +114,97 @@ def sync_schema(schema: dict = Body(...)):
 
         for table_name, columns in schema.items():
 
-            # -------------------------------
+            # --------------------------------------------------
+            # Safety check for table name
+            # --------------------------------------------------
+            if not table_name or not isinstance(columns, dict):
+                continue
+
+            # --------------------------------------------------
             # Check if table exists
-            # -------------------------------
+            # --------------------------------------------------
             cur.execute("""
                 SELECT EXISTS (
                     SELECT 1
                     FROM information_schema.tables
-                    WHERE table_name=%s
+                    WHERE table_schema='public'
+                    AND table_name=%s
                 )
             """, (table_name,))
 
             table_exists = cur.fetchone()[0]
 
-            # -------------------------------
-            # Create table if missing
-            # -------------------------------
+            # --------------------------------------------------
+            # Map SQLite types → PostgreSQL
+            # --------------------------------------------------
+            def map_type(col_type):
+
+                return {
+                    "TEXT": "TEXT",
+                    "INTEGER": "INTEGER",
+                    "REAL": "DOUBLE PRECISION",
+                    "BLOB": "BYTEA"
+                }.get((col_type or "").upper(), "TEXT")
+
+            # --------------------------------------------------
+            # CREATE TABLE
+            # --------------------------------------------------
             if not table_exists:
 
                 col_defs = []
 
                 for col, col_type in columns.items():
 
-                    pg_type = {
-                        "TEXT": "TEXT",
-                        "INTEGER": "INTEGER",
-                        "REAL": "DOUBLE PRECISION",
-                        "BLOB": "BYTEA"
-                    }.get(col_type.upper(), "TEXT")
+                    if not col:
+                        continue
 
-                    col_defs.append(f"{col} {pg_type}")
+                    pg_type = map_type(col_type)
 
-                create_sql = f"""
+                    col_defs.append(f'"{col}" {pg_type}')
+
+                if not col_defs:
+                    continue
+
+                create_sql = f'''
                 CREATE TABLE "{table_name}" (
                     {",".join(col_defs)}
                 );
-                """
+                '''
 
                 cur.execute(create_sql)
 
                 created_tables.append(table_name)
+
                 continue
 
-            # -------------------------------
-            # Fetch existing columns
-            # -------------------------------
+            # --------------------------------------------------
+            # EXISTING TABLE → CHECK COLUMNS
+            # --------------------------------------------------
             cur.execute("""
                 SELECT column_name
                 FROM information_schema.columns
-                WHERE table_name=%s
+                WHERE table_schema='public'
+                AND table_name=%s
             """, (table_name,))
 
             existing_cols = {r[0] for r in cur.fetchall()}
 
-            # -------------------------------
-            # Add missing columns
-            # -------------------------------
+            # --------------------------------------------------
+            # ADD MISSING COLUMNS
+            # --------------------------------------------------
             for col, col_type in columns.items():
 
-                if col not in existing_cols:
+                if not col or col in existing_cols:
+                    continue
 
-                    pg_type = {
-                        "TEXT": "TEXT",
-                        "INTEGER": "INTEGER",
-                        "REAL": "DOUBLE PRECISION",
-                        "BLOB": "BYTEA"
-                    }.get(col_type.upper(), "TEXT")
+                pg_type = map_type(col_type)
 
-                    cur.execute(f"""
-                        ALTER TABLE "{table_name}"
-                        ADD COLUMN "{col}" {pg_type}
-                    """)
+                cur.execute(f'''
+                    ALTER TABLE "{table_name}"
+                    ADD COLUMN "{col}" {pg_type}
+                ''')
 
-                    added_columns.append(f"{table_name}.{col}")
+                added_columns.append(f"{table_name}.{col}")
 
         conn.commit()
 
@@ -167,7 +212,11 @@ def sync_schema(schema: dict = Body(...)):
 
         conn.rollback()
         conn.close()
-        raise HTTPException(status_code=500, detail=str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Schema migration failed: {str(e)}"
+        )
 
     conn.close()
 
@@ -234,6 +283,7 @@ SYNC_TABLES = {
     "semester_dates",
     "holidays"
 }
+
 
 # ======================================================
 # PASSWORD VERIFY
@@ -1402,7 +1452,7 @@ def sync_students_from_cloud(
 
 
 # ======================================================
-# UNIVERSAL SYNC UPLOAD (SAFE + AUTO COLUMN FILTER)
+# UNIVERSAL SYNC UPLOAD (AUTO PRIMARY KEY DETECTION)
 # ======================================================
 
 @app.post("/sync-generic/{table_name}")
@@ -1419,28 +1469,10 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
     conn = connect_db()
     cur = conn.cursor()
 
-    # --------------------------------------------------
-    # PRIMARY KEY MAP
-    # --------------------------------------------------
-    pk_map = {
-        "students": "(sbrn)",
-        "subjects": "(subject_id, semester, department)",
-        "attendance_daily": "(sbrn, subject_id, semester, section, class_date)",
-        "semester_dates": "(department, semester)",
-        "holidays": "(date)",
-        "timetable_slots": "(department, semester, section, day, period_no)"
-    }
-
-    conflict_key = pk_map.get(table_name)
-
-    if not conflict_key:
-        conn.close()
-        raise HTTPException(status_code=400, detail=f"No PK for {table_name}")
-
     try:
 
         # --------------------------------------------------
-        # Detect valid DB columns
+        # Detect table columns
         # --------------------------------------------------
         cur.execute("""
             SELECT column_name
@@ -1450,20 +1482,45 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
 
         valid_columns = {r[0] for r in cur.fetchall()}
 
+        if not valid_columns:
+            raise HTTPException(status_code=400, detail="Table not found")
+
         # --------------------------------------------------
-        # Filter only valid columns from client data
+        # Detect PRIMARY KEY automatically
+        # --------------------------------------------------
+        cur.execute("""
+            SELECT a.attname
+            FROM pg_index i
+            JOIN pg_attribute a
+            ON a.attrelid = i.indrelid
+            AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = %s::regclass
+            AND i.indisprimary
+        """, (table_name,))
+
+        pk_columns = [r[0] for r in cur.fetchall()]
+
+        if not pk_columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No primary key defined for table {table_name}"
+            )
+
+        conflict_key = "(" + ",".join(pk_columns) + ")"
+
+        # --------------------------------------------------
+        # Filter valid columns from incoming data
         # --------------------------------------------------
         columns = [c for c in records[0].keys() if c in valid_columns]
 
         if not columns:
-            conn.close()
             raise HTTPException(status_code=400, detail="No valid columns")
 
         cols = ",".join(columns)
         vals = ",".join([f"%({c})s" for c in columns])
 
         update_cols = ",".join(
-            [f"{c}=EXCLUDED.{c}" for c in columns]
+            [f"{c}=EXCLUDED.{c}" for c in columns if c not in pk_columns]
         )
 
         query = f"""
@@ -1477,11 +1534,15 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         execute_batch(cur, query, records)
 
         conn.commit()
+        
+        import asyncio
+        asyncio.create_task(broadcast_event(table_name))
 
     except Exception as e:
 
         conn.rollback()
         conn.close()
+
         raise HTTPException(status_code=500, detail=str(e))
 
     conn.close()
@@ -1490,7 +1551,6 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         "status": "success",
         "rows": len(records)
     }
-
 
 # ======================================================
 # UNIVERSAL SYNC DOWNLOAD (SAFE + FAST)
