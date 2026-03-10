@@ -1,16 +1,24 @@
 from fastapi import FastAPI, HTTPException, Body, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from database import connect_db
+
+from database import connect_db, release_db, init_db_pool
+
 from models import LoginModel, AttendanceRequest
 from psycopg2.extras import execute_batch
 from fastapi import Query
 from typing import Optional
+
 import hashlib
 import base64
 from datetime import datetime
 import calendar
 from datetime import date as dt_date
+
+
+import threading
+import requests
+import time
 
 app = FastAPI()
 
@@ -64,7 +72,7 @@ def get_sync_tables():
 
     tables = [r[0] for r in cur.fetchall()]
 
-    conn.close()
+    release_db(conn)
 
     # tables we NEVER expose
     excluded = {
@@ -211,14 +219,14 @@ def sync_schema(schema: dict = Body(...)):
     except Exception as e:
 
         conn.rollback()
-        conn.close()
+        release_db(conn)
 
         raise HTTPException(
             status_code=500,
             detail=f"Schema migration failed: {str(e)}"
         )
 
-    conn.close()
+    release_db(conn)
 
     return {
         "status": "success",
@@ -251,25 +259,24 @@ async def websocket_endpoint(ws: WebSocket):
             connected_clients.remove(ws)
 
 
+
 # ======================================================
-# REALTIME BROADCAST
+# KEEP RENDER SERVICE ALIVE
 # ======================================================
 
-import asyncio
+def keep_server_awake():
 
-async def broadcast_event(table_name):
+    url = "https://attendance-api-67cs.onrender.com/health"
 
-    disconnected = []
-
-    for client in connected_clients:
+    while True:
         try:
-            await client.send_json({"table": table_name})
-        except Exception:
-            disconnected.append(client)
+            requests.get(url, timeout=10)
+            print("💓 Keep-alive ping sent")
+        except Exception as e:
+            print("⚠ Keep-alive failed:", e)
 
-    for d in disconnected:
-        if d in connected_clients:
-            connected_clients.remove(d)
+        time.sleep(600)  # every 10 minutes
+
 
 # ======================================================
 # UNIVERSAL SYNC TABLE LIST
@@ -348,7 +355,7 @@ def is_working_day(check_date: dt_date, department: str, semester: str):
         end_date   = row[1]
 
         if not (start_date <= check_date <= end_date):
-            conn.close()
+            release_db(conn)
             return False
 
     # ❌ Gazetted holiday check
@@ -358,10 +365,10 @@ def is_working_day(check_date: dt_date, department: str, semester: str):
     )
 
     if cur.fetchone():
-        conn.close()
+        release_db(conn)
         return False
 
-    conn.close()
+    release_db(conn)
     return True
 
 
@@ -373,7 +380,7 @@ def is_working_day(check_date: dt_date, department: str, semester: str):
 
 @app.on_event("startup")
 def startup():
-
+    init_db_pool()
     conn = connect_db()
     cur = conn.cursor()
 
@@ -594,9 +601,11 @@ def startup():
     """)
 
     conn.commit()
-    conn.close()
+    release_db(conn)
 
     print("✅ PostgreSQL Server Ready (SYNC ENABLED)")
+
+    threading.Thread(target=keep_server_awake, daemon=True).start()
 
 # ======================================================
 # LOGIN
@@ -615,7 +624,7 @@ def login(data: LoginModel):
     """, (data.username,))
 
     user = cur.fetchone()
-    conn.close()
+    release_db(conn)
 
     if not user:
         raise HTTPException(status_code=401, detail="Invalid Username")
@@ -650,7 +659,7 @@ def get_departments():
     """)
 
     rows = cur.fetchall()
-    conn.close()
+    release_db(conn)
 
     return [r[0] for r in rows]
 
@@ -672,7 +681,7 @@ def get_semesters(department: str):
     """, (department,))
 
     rows = cur.fetchall()
-    conn.close()
+    release_db(conn)
 
     return [r[0] for r in rows]
 
@@ -736,10 +745,10 @@ def sync_timetable(records: list = Body(...)):
 
     except Exception as e:
         conn.rollback()
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     return {"status": "success", "rows_processed": len(records)}
 
@@ -786,10 +795,10 @@ def get_timetable_sync(last_sync: Optional[str] = Query(default=None)):
         rows = cur.fetchall()
 
     except Exception as e:
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     data = [
         {
@@ -840,7 +849,7 @@ def get_timetable(department: str, semester: str, day: str):
     """, (department, semester, day))
 
     rows = cur.fetchall()
-    conn.close()
+    release_db(conn)
 
     return [
         {
@@ -897,7 +906,7 @@ def get_subjects_by_date(department: str, semester: str, date: str):
     """, (department, semester, weekday_short))
 
     rows = cur.fetchall()
-    conn.close()
+    release_db(conn)
 
     print("DEBUG subjects found:", len(rows))
 
@@ -961,10 +970,10 @@ def get_students(department: str, semester: str, section: str):
         rows = cur.fetchall()
 
     except Exception as e:
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     return [
         {
@@ -997,7 +1006,7 @@ def attendance_exists(semester: str, section: str, subject: str, date: str):
     """, (semester, subject, date, section))
 
     exists = cur.fetchone() is not None
-    conn.close()
+    release_db(conn)
 
     return {"exists": exists}
 
@@ -1096,15 +1105,19 @@ def mark_attendance(data: AttendanceRequest):
             ))
 
         conn.commit()
-        import asyncio
-        asyncio.create_task(broadcast_event("attendance_daily"))
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(broadcast_event("attendance_daily"))
+        except RuntimeError:
+            pass
 
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        conn.close()
+        release_db(conn)
 
     return {"status": "saved"}
 
@@ -1135,7 +1148,7 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
     """, (department, semester, month, year, subject))
 
     rows = cur.fetchall()
-    conn.close()
+    release_db(conn)
 
     return [
         {
@@ -1306,14 +1319,18 @@ def sync_students(records: list = Body(...)):
         conn.commit()
 
         import asyncio
-        asyncio.create_task(broadcast_event("students"))
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(broadcast_event("students"))
+        except RuntimeError:
+            pass
 
     except Exception as e:
         conn.rollback()
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     return {
         "status": "success",
@@ -1391,10 +1408,10 @@ def sync_students_from_cloud(
         rows = cur.fetchall()
 
     except Exception as e:
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     # --------------------------------------------------
     # 🔥 Build JSON Response Safely
@@ -1534,18 +1551,21 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         execute_batch(cur, query, records)
 
         conn.commit()
-        
-        import asyncio
-        asyncio.create_task(broadcast_event(table_name))
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(broadcast_event(table_name))
+        except RuntimeError:
+            pass
 
     except Exception as e:
 
         conn.rollback()
-        conn.close()
+        release_db(conn)
 
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     return {
         "status": "success",
@@ -1612,10 +1632,10 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
         columns = [d[0] for d in cur.description] if cur.description else []
 
     except Exception as e:
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     records = []
     latest_sync = None
@@ -1674,16 +1694,20 @@ def sync_attendance_to_cloud(records: list = Body(...)):
         """, records)
 
         conn.commit()
-        import asyncio
-        asyncio.create_task(broadcast_event("attendance_daily"))
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(broadcast_event("attendance_daily"))
+        except RuntimeError:
+            pass
 
 
     except Exception as e:
         conn.rollback()
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     return {"status": "success", "rows_processed": len(records)}
 
@@ -1748,10 +1772,10 @@ def sync_attendance_from_cloud(
         rows = cur.fetchall()
 
     except Exception as e:
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     # --------------------------------------------------
     # 🔥 JSON SAFE RESPONSE (DESKTOP COMPATIBLE)
@@ -1800,12 +1824,12 @@ def reset_timetable_from_desktop(department: str, semester: str):
         """, (department, semester))
 
         conn.commit()
-        conn.close()
+        release_db(conn)
 
         return {"status": "deleted"}
 
     except Exception as e:
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.delete("/sync/full-reset")
@@ -1837,19 +1861,19 @@ def full_reset_cloud(secret: str):
 
     except Exception as e:
         conn.rollback()
-        conn.close()
+        release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
-    conn.close()
+    release_db(conn)
 
     return {"status": "cloud_reset_complete"}
 
 # ======================================================
-# 🚀 ENTERPRISE FULL DATABASE SYNC (ALL TABLES)
+# 🚀 ENTERPRISE FULL DATABASE SYNC (DELTA MODE)
 # ======================================================
 
 @app.get("/sync-all")
-def sync_all_tables():
+def sync_all_tables(since: Optional[str] = None):
 
     conn = connect_db()
     cur = conn.cursor()
@@ -1862,7 +1886,7 @@ def sync_all_tables():
         cur.execute("""
             SELECT tablename
             FROM pg_tables
-            WHERE schemaname='public'
+            WHERE schemaname = 'public'
         """)
 
         tables = [r[0] for r in cur.fetchall()]
@@ -1878,25 +1902,52 @@ def sync_all_tables():
         tables = [t for t in tables if t not in excluded]
 
         result = {}
+        latest_sync = None
 
-        # ---------------------------------------------
-        # Export each table
-        # ---------------------------------------------
         for table in tables:
 
             try:
 
-                cur.execute(f"""
-                    SELECT *
-                    FROM {table}
-                    ORDER BY 1
-                """)
+                # -------------------------------------
+                # Check table columns
+                # -------------------------------------
+                cur.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name=%s
+                """, (table,))
+
+                columns_in_table = [r[0] for r in cur.fetchall()]
+                has_last_updated = "last_updated" in columns_in_table
+
+                params = ()
+                query = f'SELECT * FROM "{table}"'
+
+                # -------------------------------------
+                # Delta filtering
+                # -------------------------------------
+                if since and has_last_updated:
+
+                    try:
+                        parsed = datetime.fromisoformat(since)
+                    except Exception:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Invalid 'since' timestamp"
+                        )
+
+                    query += " WHERE last_updated > %s"
+                    params = (parsed,)
+
+                if has_last_updated:
+                    query += " ORDER BY last_updated ASC"
+                else:
+                    query += " ORDER BY 1"
+
+                cur.execute(query, params)
 
                 rows = cur.fetchall() or []
-
-                columns = [
-                    d[0] for d in cur.description
-                ] if cur.description else []
+                columns = [d[0] for d in cur.description] if cur.description else []
 
                 records = []
 
@@ -1904,29 +1955,44 @@ def sync_all_tables():
 
                     rec = dict(zip(columns, row))
 
-                    # convert datetime → ISO
                     for k, v in rec.items():
                         if hasattr(v, "isoformat"):
                             rec[k] = v.isoformat()
+
+                    if "last_updated" in rec:
+                        latest_sync = rec["last_updated"]
 
                     records.append(rec)
 
                 result[table] = records
 
-            except Exception as e:
+            except Exception as table_error:
 
-                print(f"⚠ Skip table {table}: {e}")
+                print(f"⚠ Skip table {table}: {table_error}")
                 result[table] = []
-
-        conn.close()
 
         return {
             "status": "success",
+            "tables": result,
             "table_count": len(result),
-            "tables": result
+            "latest_sync": latest_sync
         }
 
     except Exception as e:
 
-        conn.close()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Full sync failed: {str(e)}"
+        )
+
+    finally:
+
+        try:
+            cur.close()
+        except:
+            pass
+
+        try:
+            release_db(conn)
+        except:
+            pass
