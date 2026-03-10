@@ -1309,6 +1309,27 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
     conn = connect_db()
     cur = conn.cursor()
 
+    # --------------------------------------------------
+    # PRIMARY KEY MAP
+    # --------------------------------------------------
+    pk_map = {
+        "students": "sbrn",
+        "subjects": "(subject_id, semester, department)",
+        "timetable_slots": "id",
+        "attendance_daily": "(sbrn, subject_id, semester, section, class_date)",
+        "holidays": "date",
+        "semester_dates": "(department, semester)"
+    }
+
+    conflict_key = pk_map.get(table_name)
+
+    if not conflict_key:
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail=f"No primary key defined for {table_name}"
+        )
+
     try:
 
         columns = records[0].keys()
@@ -1317,13 +1338,13 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         vals = ",".join([f"%({c})s" for c in columns])
 
         update_cols = ",".join(
-            [f"{c}=EXCLUDED.{c}" for c in columns if c != "id"]
+            [f"{c}=EXCLUDED.{c}" for c in columns]
         )
 
         query = f"""
         INSERT INTO {table_name} ({cols})
         VALUES ({vals})
-        ON CONFLICT (sbrn)
+        ON CONFLICT {conflict_key}
         DO UPDATE SET
         {update_cols};
         """
