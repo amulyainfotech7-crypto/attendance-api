@@ -1101,7 +1101,8 @@ def mark_attendance(data: AttendanceRequest):
                 ON CONFLICT (sbrn, subject_id, semester, section, class_date)
                 DO UPDATE SET
                     attended = EXCLUDED.attended,
-                    last_updated = CURRENT_TIMESTAMP
+                    last_updated = EXCLUDED.last_updated
+                WHERE attendance_daily.last_updated < EXCLUDED.last_updated
             """, (
                 rec.sbrn,
                 data.subject,   # subject_id
