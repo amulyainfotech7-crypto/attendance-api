@@ -388,7 +388,9 @@ def is_working_day(check_date: dt_date, department: str, semester: str):
 
 @app.on_event("startup")
 def startup():
+
     init_db_pool()
+
     conn = connect_db()
     cur = conn.cursor()
 
@@ -405,7 +407,7 @@ def startup():
     """)
 
     # ======================================================
-    # STUDENTS (FULL SYNC READY)
+    # STUDENTS (SYNC SAFE + SESSION YEAR FIX)
     # ======================================================
     cur.execute("""
         CREATE TABLE IF NOT EXISTS students(
@@ -414,11 +416,19 @@ def startup():
             department TEXT,
             semester TEXT,
             section TEXT,
+            session_year TEXT,
 
             mobile_no TEXT,
             father_name TEXT,
             district TEXT,
             photo TEXT,
+
+            dob TEXT,
+            address TEXT,
+            state TEXT,
+            pincode TEXT,
+            gender TEXT,
+            sr_no TEXT,
 
             course TEXT,
             batch TEXT,
@@ -435,25 +445,57 @@ def startup():
         )
     """)
 
-    # Safe column repair (backward compatibility)
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS course TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS batch TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS admission_date TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS year_semester TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS academic_status TEXT DEFAULT 'REGULAR'")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP")
+    # ======================================================
+    # SAFE COLUMN REPAIR
+    # ======================================================
+
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS session_year TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS mobile_no TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS father_name TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS district TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS photo TEXT")
 
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS dob TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS address TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS state TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS pincode TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS gender TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sr_no TEXT")
+
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS course TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS batch TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS admission_date TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS year_semester TEXT")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS academic_status TEXT DEFAULT 'REGULAR'")
+
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0")
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP")
+
+    # ======================================================
+    # FACULTY TABLE (NEW)
+    # ======================================================
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS faculty(
+            faculty_id TEXT PRIMARY KEY,
+            name TEXT,
+            department TEXT,
+            mobile TEXT,
+            email TEXT,
+            designation TEXT,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            version INTEGER DEFAULT 1,
+            is_deleted INTEGER DEFAULT 0
+        )
+    """)
+
     # ======================================================
     # SUBJECTS
     # ======================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS subjects(
             subject_id TEXT,
@@ -468,6 +510,7 @@ def startup():
     # ======================================================
     # TIMETABLE
     # ======================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS timetable_slots(
             id SERIAL PRIMARY KEY,
@@ -487,10 +530,10 @@ def startup():
         )
     """)
 
-
     # ======================================================
     # SEMESTER DATES
     # ======================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS semester_dates(
             department TEXT,
@@ -504,31 +547,18 @@ def startup():
     # ======================================================
     # HOLIDAYS
     # ======================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS holidays(
             date DATE PRIMARY KEY,
             description TEXT
         )
     """)
-    # ======================================================
-    # AUTO-HEAL SUBJECTS FROM TIMETABLE
-    # ======================================================
-    cur.execute("""
-        INSERT INTO subjects (subject_id, subject_name, department, semester, type)
-        SELECT DISTINCT
-            subject_id,
-            subject_id,
-            department,
-            semester,
-            type
-        FROM timetable_slots
-        WHERE subject_id IS NOT NULL
-        ON CONFLICT DO NOTHING;
-    """)
 
     # ======================================================
-    # ATTENDANCE TABLE (DESKTOP-ALIGNED FINAL STRUCTURE)
+    # ATTENDANCE
     # ======================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_daily(
             sbrn TEXT NOT NULL,
@@ -544,55 +574,9 @@ def startup():
     """)
 
     # ======================================================
-    # SAFE REBUILD FOR VERY OLD DATABASES (if legacy id column exists)
+    # PERFORMANCE INDEXES
     # ======================================================
-    cur.execute("""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name='attendance_daily'
-    """)
-    columns = [row[0] for row in cur.fetchall()]
 
-    if "id" in columns:
-        print("🔄 Rebuilding legacy attendance_daily table...")
-
-        cur.execute("ALTER TABLE attendance_daily RENAME TO attendance_old;")
-
-        cur.execute("""
-            CREATE TABLE attendance_daily(
-                sbrn TEXT NOT NULL,
-                subject_id TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                semester TEXT NOT NULL,
-                section TEXT NOT NULL,
-                class_date DATE NOT NULL,
-                attended INTEGER NOT NULL,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (sbrn, subject_id, semester, section, class_date)
-            );
-        """)
-
-        cur.execute("""
-            INSERT INTO attendance_daily
-            (sbrn, subject_id, subject, semester, section, class_date, attended, last_updated)
-            SELECT
-                sbrn,
-                subject AS subject_id,
-                subject,
-                semester,
-                section,
-                class_date,
-                attended,
-                last_updated
-            FROM attendance_old;
-        """)
-
-        cur.execute("DROP TABLE attendance_old;")
-        print("✅ attendance_daily rebuilt successfully.")
-
-    # ======================================================
-    # PERFORMANCE INDEXES (SAFE)
-    # ======================================================
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_attendance_semester
         ON attendance_daily (semester);
@@ -695,7 +679,88 @@ def get_semesters(department: str):
 
 
 # ======================================================
-# 🔥 SYNC TIMETABLE (LOCAL → CLOUD)
+# 🔥 FACULTY SYNC (LOCAL → CLOUD)
+# ======================================================
+
+@app.post("/sync/faculty")
+def sync_faculty(records: list = Body(...)):
+
+    if not records:
+        return {"status": "no_data"}
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    query = """
+    INSERT INTO faculty
+    (faculty_id,name,department,mobile,email,designation,last_updated,version,is_deleted)
+    VALUES
+    (%(faculty_id)s,%(name)s,%(department)s,%(mobile)s,%(email)s,%(designation)s,%(last_updated)s,%(version)s,%(is_deleted)s)
+    ON CONFLICT (faculty_id)
+    DO UPDATE SET
+        name = EXCLUDED.name,
+        department = EXCLUDED.department,
+        mobile = EXCLUDED.mobile,
+        email = EXCLUDED.email,
+        designation = EXCLUDED.designation,
+        last_updated = EXCLUDED.last_updated,
+        version = EXCLUDED.version,
+        is_deleted = EXCLUDED.is_deleted
+    WHERE faculty.version <= EXCLUDED.version;
+    """
+
+    execute_batch(cur, query, records)
+
+    conn.commit()
+    release_db(conn)
+
+    return {"status":"success","rows":len(records)}
+
+
+# ======================================================
+# 🔥 FACULTY CLOUD → LOCAL
+# ======================================================
+@app.get("/sync/faculty")
+def sync_faculty_from_cloud(since: Optional[str] = None):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    if since:
+        cur.execute("""
+            SELECT * FROM faculty
+            WHERE last_updated > %s
+            ORDER BY last_updated ASC
+        """,(since,))
+    else:
+        cur.execute("SELECT * FROM faculty ORDER BY last_updated ASC")
+
+    rows = cur.fetchall()
+
+    columns = [d[0] for d in cur.description]
+
+    records = []
+
+    for r in rows:
+
+        rec = dict(zip(columns,r))
+
+        for k,v in rec.items():
+            if hasattr(v,"isoformat"):
+                rec[k] = v.isoformat()
+
+        records.append(rec)
+
+    release_db(conn)
+
+    return {
+        "status":"success",
+        "records":records,
+        "count":len(records)
+    }
+
+# ======================================================
+# 🔥 SYNC TIMETABLE (LOCAL → CLOUD) – FINAL SAFE VERSION
 # ======================================================
 
 @app.post("/sync/timetable")
@@ -707,58 +772,130 @@ def sync_timetable(records: list = Body(...)):
     conn = connect_db()
     cur = conn.cursor()
 
-    query = """
-    INSERT INTO timetable_slots
-    (department, semester, section, day, period_no,
-     period_len, type, subject_id, faculty_id, room,
-     last_updated, version)
-    VALUES (%(department)s, %(semester)s, %(section)s,
-            %(day)s, %(period_no)s,
-            %(period_len)s, %(type)s,
-            %(subject_id)s, %(faculty_id)s, %(room)s,
-            %(last_updated)s, %(version)s)
-    ON CONFLICT (department, semester, section, day, period_no)
-    DO UPDATE SET
-        period_len = EXCLUDED.period_len,
-        type = EXCLUDED.type,
-        subject_id = EXCLUDED.subject_id,
-        faculty_id = EXCLUDED.faculty_id,
-        room = EXCLUDED.room,
-        last_updated = EXCLUDED.last_updated,
-        version = EXCLUDED.version
-    WHERE timetable_slots.version < EXCLUDED.version;
-    """
-
     try:
-        # 🔹 Main timetable sync
-        execute_batch(cur, query, records)
+
+        # --------------------------------------------------
+        # Ensure table exists (fresh cloud safety)
+        # --------------------------------------------------
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS timetable_slots(
+            id SERIAL PRIMARY KEY,
+            department TEXT NOT NULL,
+            semester TEXT NOT NULL,
+            section TEXT NOT NULL,
+            day TEXT NOT NULL,
+            period_no INTEGER NOT NULL,
+            period_len INTEGER,
+            type TEXT,
+            subject_id TEXT,
+            faculty_id TEXT,
+            room TEXT,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            version INTEGER DEFAULT 1,
+            sync_pending INTEGER DEFAULT 0,
+            UNIQUE(department,semester,section,day,period_no)
+        )
+        """)
+
+        # --------------------------------------------------
+        # Normalize records
+        # --------------------------------------------------
+
+        normalized = []
+
+        for r in records:
+
+            normalized.append({
+                "department": r.get("department"),
+                "semester": r.get("semester"),
+                "section": r.get("section"),
+                "day": r.get("day"),
+                "period_no": r.get("period_no"),
+                "period_len": r.get("period_len"),
+                "type": r.get("type"),
+                "subject_id": r.get("subject_id"),
+                "faculty_id": r.get("faculty_id"),
+                "room": r.get("room"),
+                "last_updated": r.get("last_updated") or datetime.utcnow(),
+                "version": r.get("version",1)
+            })
+
+        # --------------------------------------------------
+        # UPSERT TIMETABLE
+        # --------------------------------------------------
+
+        query = """
+        INSERT INTO timetable_slots
+        (department,semester,section,day,period_no,
+         period_len,type,subject_id,faculty_id,room,
+         last_updated,version)
+
+        VALUES
+        (%(department)s,%(semester)s,%(section)s,%(day)s,%(period_no)s,
+         %(period_len)s,%(type)s,%(subject_id)s,%(faculty_id)s,%(room)s,
+         %(last_updated)s,%(version)s)
+
+        ON CONFLICT (department,semester,section,day,period_no)
+        DO UPDATE SET
+            period_len = EXCLUDED.period_len,
+            type = EXCLUDED.type,
+            subject_id = EXCLUDED.subject_id,
+            faculty_id = EXCLUDED.faculty_id,
+            room = EXCLUDED.room,
+            last_updated = EXCLUDED.last_updated,
+            version = EXCLUDED.version
+        WHERE timetable_slots.version <= EXCLUDED.version;
+        """
+
+        execute_batch(cur, query, normalized)
+
         conn.commit()
 
-        # ======================================================
-        # 🔥 AUTO-HEAL SUBJECTS AFTER TIMETABLE SYNC (PERMANENT)
-        # ======================================================
+        # --------------------------------------------------
+        # 🔥 AUTO CREATE SUBJECTS FROM TIMETABLE
+        # --------------------------------------------------
+
         cur.execute("""
-            INSERT INTO subjects (subject_id, subject_name, department, semester, type)
-            SELECT DISTINCT
-                subject_id,
-                subject_id,
-                department,
-                semester,
-                type
-            FROM timetable_slots
-            WHERE subject_id IS NOT NULL
-            ON CONFLICT DO NOTHING;
+        INSERT INTO subjects (subject_id,subject_name,department,semester,type)
+        SELECT DISTINCT
+            subject_id,
+            subject_id,
+            department,
+            semester,
+            type
+        FROM timetable_slots
+        WHERE subject_id IS NOT NULL
+        ON CONFLICT DO NOTHING
         """)
+
         conn.commit()
+
+        # --------------------------------------------------
+        # Broadcast realtime update
+        # --------------------------------------------------
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(broadcast_event("timetable_slots"))
+        except RuntimeError:
+            pass
 
     except Exception as e:
+
         conn.rollback()
         release_db(conn)
-        raise HTTPException(status_code=500, detail=str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
     release_db(conn)
 
-    return {"status": "success", "rows_processed": len(records)}
+    return {
+        "status":"success",
+        "rows_processed":len(normalized)
+    }
 
 # ======================================================
 # 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL SAFE)
