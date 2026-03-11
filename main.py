@@ -412,6 +412,7 @@ def startup():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS students(
             sbrn TEXT PRIMARY KEY,
+            sync_id UUID,
             name TEXT,
             department TEXT,
             semester TEXT,
@@ -449,6 +450,7 @@ def startup():
     # SAFE COLUMN REPAIR
     # ======================================================
 
+    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_id UUID")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS session_year TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS mobile_no TEXT")
     cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS father_name TEXT")
@@ -1329,6 +1331,7 @@ def sync_students(records: list = Body(...)):
 
         normalized.append({
             "sbrn": r.get("sbrn"),
+            "sync_id": r.get("sync_id"),
             "name": r.get("name"),
             "semester": r.get("semester"),
             "section": r.get("section"),
@@ -1369,6 +1372,7 @@ def sync_students(records: list = Body(...)):
     INSERT INTO students
     (
         sbrn,
+        sync_id,
         name,
         semester,
         section,
@@ -1400,6 +1404,7 @@ def sync_students(records: list = Body(...)):
     VALUES
     (
         %(sbrn)s,
+        %(sync_id)s,
         %(name)s,
         %(semester)s,
         %(section)s,
@@ -1428,7 +1433,7 @@ def sync_students(records: list = Body(...)):
         %(is_deleted)s,
         %(deleted_at)s
     )
-    ON CONFLICT (sbrn)
+    ON CONFLICT (sync_id)
     DO UPDATE SET
         name = EXCLUDED.name,
         semester = EXCLUDED.semester,
