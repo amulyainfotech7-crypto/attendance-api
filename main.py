@@ -1314,7 +1314,6 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
 # 🔥 SYNC STUDENTS (LOCAL → CLOUD) — FINAL ENTERPRISE SAFE
 # ======================================================
 
-
 @app.post("/sync/students")
 def sync_students(records: list = Body(...)):
 
@@ -1342,7 +1341,7 @@ def sync_students(records: list = Body(...)):
             "district": r.get("district"),
             "photo": r.get("photo"),
 
-            # 🔥 NEW PROFILE FIELDS
+            # 🔥 PROFILE FIELDS
             "dob": r.get("dob"),
             "address": r.get("address"),
             "state": r.get("state"),
@@ -1433,8 +1432,10 @@ def sync_students(records: list = Body(...)):
         %(is_deleted)s,
         %(deleted_at)s
     )
-    ON CONFLICT (sync_id)
+
+    ON CONFLICT (sbrn)
     DO UPDATE SET
+
         name = EXCLUDED.name,
         semester = EXCLUDED.semester,
         section = EXCLUDED.section,
@@ -1462,13 +1463,17 @@ def sync_students(records: list = Body(...)):
         version = EXCLUDED.version,
         is_deleted = EXCLUDED.is_deleted,
         deleted_at = EXCLUDED.deleted_at
+
     WHERE students.version <= EXCLUDED.version;
     """
 
     try:
+
         execute_batch(cur, query, normalized)
+
         conn.commit()
 
+        # 🔥 Realtime broadcast
         import asyncio
         try:
             loop = asyncio.get_running_loop()
@@ -1477,9 +1482,14 @@ def sync_students(records: list = Body(...)):
             pass
 
     except Exception as e:
+
         conn.rollback()
         release_db(conn)
-        raise HTTPException(status_code=500, detail=str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
     release_db(conn)
 
