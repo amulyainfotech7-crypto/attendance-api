@@ -296,7 +296,13 @@ SYNC_TABLES = {
     "timetable_slots",
     "subjects",
     "semester_dates",
-    "holidays"
+    "holidays",
+
+    # 🔥 ADD THESE
+    "faculty",
+    "rooms",
+    "departments",
+    "faculty_subject_map"
 }
 
 
