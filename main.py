@@ -516,6 +516,48 @@ def startup():
     """)
 
     # ======================================================
+    # ROOMS
+    # ======================================================
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS rooms(
+        room_id TEXT PRIMARY KEY,
+        room_name TEXT,
+        capacity INTEGER,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # ======================================================
+    # DEPARTMENTS
+    # ======================================================
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS departments(
+        id SERIAL PRIMARY KEY,
+        name TEXT UNIQUE,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # ======================================================
+    # FACULTY SUBJECT MAP
+    # ======================================================
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS faculty_subject_map(
+        id SERIAL PRIMARY KEY,
+        faculty_id TEXT,
+        subject_id TEXT,
+        department TEXT,
+        semester TEXT,
+        section TEXT,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+
+    # ======================================================
     # TIMETABLE
     # ======================================================
 
