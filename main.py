@@ -101,6 +101,12 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+@app.post("/sync-notify")
+def sync_notify(data: dict):
+
+    print("🔔 Sync completed notification received:", data)
+
+    return {"status": "ok"}
 
 # ======================================================
 # AUTO SCHEMA MIGRATION (DESKTOP → CLOUD) — FINAL SAFE
