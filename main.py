@@ -1378,25 +1378,49 @@ def sync_students(records: list = Body(...)):
 
     for r in records:
 
+        # --------------------------------------------------
         # 🔒 Critical validation
-        if not r.get("sbrn"):
+        # --------------------------------------------------
+        sbrn = r.get("sbrn")
+        if not sbrn:
             continue
 
+        # --------------------------------------------------
+        # SAFE VERSION PARSE
+        # --------------------------------------------------
+        try:
+            version = int(r.get("version") or 1)
+        except Exception:
+            version = 1
+
+        # --------------------------------------------------
+        # SAFE SESSION YEAR
+        # --------------------------------------------------
+        session_year = r.get("session_year")
+
+        if not session_year:
+            try:
+                sbrn_str = str(sbrn)
+                if len(sbrn_str) >= 2:
+                    session_year = str(2000 + int(sbrn_str[:2]))
+            except Exception:
+                session_year = None
+
         normalized.append({
-            "sbrn": r.get("sbrn"),
+
+            "sbrn": sbrn,
             "sync_id": r.get("sync_id"),
             "name": r.get("name"),
             "semester": r.get("semester"),
             "section": r.get("section"),
             "department": r.get("department"),
 
-            "session_year": r.get("session_year") or None,
+            "session_year": session_year,
             "mobile_no": r.get("mobile_no"),
             "father_name": r.get("father_name"),
             "district": r.get("district"),
             "photo": r.get("photo"),
 
-            # 🔥 PROFILE FIELDS
             "dob": r.get("dob"),
             "address": r.get("address"),
             "state": r.get("state"),
@@ -1411,7 +1435,7 @@ def sync_students(records: list = Body(...)):
             "academic_status": r.get("academic_status", "REGULAR"),
 
             "last_updated": r.get("last_updated") or datetime.utcnow(),
-            "version": int(r.get("version") or 1),
+            "version": version,
             "is_deleted": r.get("is_deleted", 0),
             "deleted_at": r.get("deleted_at"),
         })
@@ -1422,6 +1446,54 @@ def sync_students(records: list = Body(...)):
     conn = connect_db()
     cur = conn.cursor()
 
+    # --------------------------------------------------
+    # REMOVE DUPLICATE SBRN
+    # --------------------------------------------------
+    sbrns = list({r["sbrn"] for r in normalized})
+
+    if not sbrns:
+        release_db(conn)
+        return {"status": "no_valid_records"}
+
+    placeholders = ",".join(["%s"] * len(sbrns))
+
+    # --------------------------------------------------
+    # FETCH EXISTING CLOUD VERSIONS
+    # --------------------------------------------------
+    cur.execute(f"""
+        SELECT sbrn, version
+        FROM students
+        WHERE sbrn IN ({placeholders})
+    """, sbrns)
+
+    existing_versions = {
+        r[0]: (r[1] or 0) for r in cur.fetchall()
+    }
+
+    # --------------------------------------------------
+    # FILTER ONLY NEWER RECORDS
+    # --------------------------------------------------
+    filtered = []
+
+    for r in normalized:
+
+        cloud_version = existing_versions.get(r["sbrn"], 0) or 0
+        local_version = r.get("version") or 0
+
+        try:
+            if int(local_version) >= int(cloud_version):
+                filtered.append(r)
+        except Exception:
+            filtered.append(r)
+
+    if not filtered:
+        release_db(conn)
+        print(f"⚡ Students skipped (up-to-date): {len(normalized)}")
+        return {"status": "up_to_date"}
+
+    # --------------------------------------------------
+    # UPSERT QUERY
+    # --------------------------------------------------
     query = """
     INSERT INTO students
     (
@@ -1527,42 +1599,13 @@ def sync_students(records: list = Body(...)):
 
     try:
 
-        # --------------------------------------------------
-        # FILTER ONLY NEWER VERSIONS (PERFORMANCE BOOST)
-        # --------------------------------------------------
-
-        sbrns = list({r["sbrn"] for r in normalized})
-
-        placeholders = ",".join(["%s"] * len(sbrns))
-
-        cur.execute(f"""
-            SELECT sbrn, version
-            FROM students
-            WHERE sbrn IN ({placeholders})
-        """, sbrns)
-
-        existing_versions = {r[0]: r[1] for r in cur.fetchall()}
-
-        filtered = []
-
-        for r in normalized:
-
-            cloud_version = existing_versions.get(r["sbrn"], 0) or 0
-            local_version = r.get("version") or 0
-
-            if local_version >= cloud_version:
-                filtered.append(r)
-
-        if not filtered:
-            release_db(conn)
-            return {"status": "up_to_date"}
-
         execute_batch(cur, query, filtered)
 
         conn.commit()
 
-        # 🔥 Realtime broadcast
-        import asyncio
+        # --------------------------------------------------
+        # REALTIME EVENT
+        # --------------------------------------------------
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(broadcast_event("students"))
@@ -1585,8 +1628,6 @@ def sync_students(records: list = Body(...)):
         "status": "success",
         "rows_processed": len(filtered)
     }
-
-
 
 # ======================================================
 # 🔥 INCREMENTAL STUDENT SYNC (CLOUD → DESKTOP SAFE)
