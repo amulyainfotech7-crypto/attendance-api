@@ -1390,6 +1390,7 @@ def sync_students(records: list = Body(...)):
             "section": r.get("section"),
             "department": r.get("department"),
 
+            "session_year": r.get("session_year") or None,
             "mobile_no": r.get("mobile_no"),
             "father_name": r.get("father_name"),
             "district": r.get("district"),
@@ -1431,6 +1432,7 @@ def sync_students(records: list = Body(...)):
         section,
         department,
 
+        session_year,
         mobile_no,
         father_name,
         district,
@@ -1463,6 +1465,7 @@ def sync_students(records: list = Body(...)):
         %(section)s,
         %(department)s,
 
+        %(session_year)s,
         %(mobile_no)s,
         %(father_name)s,
         %(district)s,
@@ -1495,6 +1498,7 @@ def sync_students(records: list = Body(...)):
         section = EXCLUDED.section,
         department = EXCLUDED.department,
 
+        session_year = EXCLUDED.session_year,
         mobile_no = EXCLUDED.mobile_no,
         father_name = EXCLUDED.father_name,
         district = EXCLUDED.district,
@@ -1523,7 +1527,36 @@ def sync_students(records: list = Body(...)):
 
     try:
 
-        execute_batch(cur, query, normalized)
+        # --------------------------------------------------
+        # FILTER ONLY NEWER VERSIONS (PERFORMANCE BOOST)
+        # --------------------------------------------------
+
+        sbrns = list({r["sbrn"] for r in normalized})
+
+        placeholders = ",".join(["%s"] * len(sbrns))
+
+        cur.execute(f"""
+            SELECT sbrn, version
+            FROM students
+            WHERE sbrn IN ({placeholders})
+        """, sbrns)
+
+        existing_versions = {r[0]: r[1] for r in cur.fetchall()}
+
+        filtered = []
+
+        for r in normalized:
+
+            cloud_version = existing_versions.get(r["sbrn"], 0)
+
+            if r["version"] >= cloud_version:
+                filtered.append(r)
+
+        if not filtered:
+            release_db(conn)
+            return {"status": "up_to_date"}
+
+        execute_batch(cur, query, filtered)
 
         conn.commit()
 
@@ -1549,13 +1582,14 @@ def sync_students(records: list = Body(...)):
 
     return {
         "status": "success",
-        "rows_processed": len(normalized)
+        "rows_processed": len(filtered)
     }
+
+
 
 # ======================================================
 # 🔥 INCREMENTAL STUDENT SYNC (CLOUD → DESKTOP SAFE)
 # ======================================================
-
 
 @app.get("/sync/students")
 def sync_students_from_cloud(
@@ -1579,6 +1613,7 @@ def sync_students_from_cloud(
                 semester,
                 section,
                 department,
+                session_year,
 
                 mobile_no,
                 father_name,
@@ -1637,8 +1672,8 @@ def sync_students_from_cloud(
 
     for r in rows:
 
-        last_updated_val = r[20]
-        deleted_at_val = r[23]
+        last_updated_val = r[21]
+        deleted_at_val = r[24]
 
         if last_updated_val:
             latest_sync = last_updated_val.isoformat()
@@ -1649,28 +1684,29 @@ def sync_students_from_cloud(
             "semester": r[2],
             "section": r[3],
             "department": r[4],
+            "session_year": r[5],
 
-            "mobile_no": r[5],
-            "father_name": r[6],
-            "district": r[7],
-            "photo": r[8],
+            "mobile_no": r[6],
+            "father_name": r[7],
+            "district": r[8],
+            "photo": r[9],
 
-            "dob": r[9],
-            "address": r[10],
-            "state": r[11],
-            "pincode": r[12],
-            "gender": r[13],
-            "sr_no": r[14],
+            "dob": r[10],
+            "address": r[11],
+            "state": r[12],
+            "pincode": r[13],
+            "gender": r[14],
+            "sr_no": r[15],
 
-            "course": r[15],
-            "batch": r[16],
-            "admission_date": r[17],
-            "year_semester": r[18],
-            "academic_status": r[19],
+            "course": r[16],
+            "batch": r[17],
+            "admission_date": r[18],
+            "year_semester": r[19],
+            "academic_status": r[20],
 
             "last_updated": last_updated_val.isoformat() if last_updated_val else None,
-            "version": r[21],
-            "is_deleted": r[22],
+            "version": r[22],
+            "is_deleted": r[23],
             "deleted_at": deleted_at_val.isoformat() if deleted_at_val else None,
         })
 
@@ -1680,8 +1716,6 @@ def sync_students_from_cloud(
         "latest_sync": latest_sync,
         "records": records
     }
-
-
 
 # ======================================================
 # UNIVERSAL SYNC UPLOAD (AUTO PRIMARY KEY DETECTION)
