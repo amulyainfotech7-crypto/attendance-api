@@ -1411,7 +1411,7 @@ def sync_students(records: list = Body(...)):
             "academic_status": r.get("academic_status", "REGULAR"),
 
             "last_updated": r.get("last_updated") or datetime.utcnow(),
-            "version": r.get("version", 1),
+            "version": int(r.get("version") or 1),
             "is_deleted": r.get("is_deleted", 0),
             "deleted_at": r.get("deleted_at"),
         })
@@ -1547,9 +1547,10 @@ def sync_students(records: list = Body(...)):
 
         for r in normalized:
 
-            cloud_version = existing_versions.get(r["sbrn"], 0)
+            cloud_version = existing_versions.get(r["sbrn"], 0) or 0
+            local_version = r.get("version") or 0
 
-            if r["version"] >= cloud_version:
+            if local_version >= cloud_version:
                 filtered.append(r)
 
         if not filtered:
