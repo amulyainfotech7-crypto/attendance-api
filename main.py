@@ -1394,15 +1394,21 @@ def sync_students(records: list = Body(...)):
             version = 1
 
         # --------------------------------------------------
-        # SAFE SESSION YEAR
+        # SAFE SESSION YEAR (AUTO DERIVE FROM SBRN)
         # --------------------------------------------------
+
         session_year = r.get("session_year")
 
-        if not session_year:
+        if not session_year or str(session_year).strip() == "":
+
             try:
-                sbrn_str = str(sbrn)
-                if len(sbrn_str) >= 2:
-                    session_year = str(2000 + int(sbrn_str[:2]))
+                sbrn = str(r.get("sbrn", ""))
+
+                if len(sbrn) >= 2:
+
+                    year_prefix = int(sbrn[:2])
+                    session_year = str(2000 + year_prefix)
+
             except Exception:
                 session_year = None
 
