@@ -64,23 +64,29 @@ def get_sync_tables():
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT tablename
-        FROM pg_tables
-        WHERE schemaname = 'public'
-    """)
+    try:
+        cur.execute("""
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname = 'public'
+        """)
 
-    tables = [r[0] for r in cur.fetchall()]
+        tables = [r[0] for r in cur.fetchall()]
 
-    release_db(conn)
+        # tables we NEVER expose
+        excluded = {
+            "users",
+            "pg_stat_statements"
+        }
 
-    # tables we NEVER expose
-    excluded = {
-        "users",
-        "pg_stat_statements"
-    }
+        return [t for t in tables if t not in excluded]
 
-    return [t for t in tables if t not in excluded]
+    except Exception as e:
+        print("❌ get_sync_tables error:", e)
+        return []
+
+    finally:
+        release_db(conn)
 
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -100,6 +106,10 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/")
+def root():
+    return {"status": "API running"}
 
 @app.post("/sync-notify")
 def sync_notify(data: dict):
@@ -272,23 +282,28 @@ async def websocket_endpoint(ws: WebSocket):
 
 def keep_server_awake():
 
+    import os
+
+    base_url = os.getenv("RENDER_EXTERNAL_URL")
+
+    if not base_url:
+        print("⚠ No RENDER_EXTERNAL_URL found")
+        return
+
     urls = [
-        "https://attendance-api-67cs.onrender.com/health",
-        "https://attendance-api-67cs.onrender.com/sync-all"
+        f"{base_url}/health",
+        f"{base_url}/sync-all"
     ]
 
     while True:
 
         for url in urls:
-
             try:
                 requests.get(url, timeout=10)
                 print(f"💓 Keep-alive ping OK → {url}")
-
             except Exception as e:
                 print(f"⚠ Keep-alive failed → {url} : {e}")
 
-        # wait 10 minutes
         time.sleep(600)
 
 
@@ -360,36 +375,38 @@ def is_working_day(check_date: dt_date, department: str, semester: str):
     conn = connect_db()
     cur = conn.cursor()
 
-    # ❌ Semester date range check
-    cur.execute("""
-        SELECT start_date, end_date
-        FROM semester_dates
-        WHERE LOWER(department)=LOWER(%s)
-          AND LOWER(semester)=LOWER(%s)
-    """, (department, semester))
+    try:
+        # ❌ Semester date range check
+        cur.execute("""
+            SELECT start_date, end_date
+            FROM semester_dates
+            WHERE LOWER(department)=LOWER(%s)
+              AND LOWER(semester)=LOWER(%s)
+        """, (department, semester))
 
-    row = cur.fetchone()
+        row = cur.fetchone()
 
-    if row:
-        start_date = row[0]
-        end_date   = row[1]
+        if row:
+            if not (row[0] <= check_date <= row[1]):
+                return False
 
-        if not (start_date <= check_date <= end_date):
-            release_db(conn)
+        # ❌ Gazetted holiday check
+        cur.execute(
+            "SELECT 1 FROM holidays WHERE date=%s",
+            (check_date,)
+        )
+
+        if cur.fetchone():
             return False
 
-    # ❌ Gazetted holiday check
-    cur.execute(
-        "SELECT 1 FROM holidays WHERE date=%s",
-        (check_date,)
-    )
+        return True
 
-    if cur.fetchone():
+    except Exception as e:
+        print("❌ is_working_day error:", e)
+        return True  # fallback safe (don’t block system)
+
+    finally:
         release_db(conn)
-        return False
-
-    release_db(conn)
-    return True
 
 
 
@@ -401,260 +418,280 @@ def is_working_day(check_date: dt_date, department: str, semester: str):
 @app.on_event("startup")
 def startup():
 
-    init_db_pool()
+    print("🚀 APP STARTING...")
 
-    conn = connect_db()
-    cur = conn.cursor()
+    try:
+        import os
+        db_url = os.getenv("DATABASE_URL", "")
+        print("🌍 DATABASE_URL:", db_url.split("@")[-1])
 
-    # ======================================================
-    # USERS
-    # ======================================================
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-            username TEXT PRIMARY KEY,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL,
-            active INTEGER DEFAULT 1
+        # 🔥 STEP 1: Initialize DB pool
+        init_db_pool()
+        print("✅ DB Pool initialized")
+
+        # 🔥 STEP 2: Test DB connection
+        conn = connect_db()
+        cur = conn.cursor()
+
+        cur.execute("SELECT 1;")
+        print("✅ DB TEST SUCCESS")
+
+
+        # ======================================================
+        # USERS
+        # ======================================================
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users(
+                username TEXT PRIMARY KEY,
+                password TEXT NOT NULL,
+                role TEXT NOT NULL,
+                active INTEGER DEFAULT 1
+            )
+        """)
+
+        # ======================================================
+        # STUDENTS (SYNC SAFE + SESSION YEAR FIX)
+        # ======================================================
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS students(
+                sbrn TEXT PRIMARY KEY,
+                sync_id UUID,
+                name TEXT,
+                department TEXT,
+                semester TEXT,
+                section TEXT,
+                session_year TEXT,
+
+                mobile_no TEXT,
+                father_name TEXT,
+                district TEXT,
+                photo TEXT,
+
+                dob TEXT,
+                address TEXT,
+                state TEXT,
+                pincode TEXT,
+                gender TEXT,
+                sr_no TEXT,
+
+                course TEXT,
+                batch TEXT,
+                admission_date TEXT,
+                year_semester TEXT,
+
+                academic_status TEXT DEFAULT 'REGULAR',
+
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                version INTEGER DEFAULT 1,
+                sync_pending INTEGER DEFAULT 0,
+                is_deleted INTEGER DEFAULT 0,
+                deleted_at TIMESTAMP
+            )
+        """)
+
+        # ======================================================
+        # SAFE COLUMN REPAIR
+        # ======================================================
+
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_id UUID")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS session_year TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS mobile_no TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS father_name TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS district TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS photo TEXT")
+
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS dob TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS address TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS state TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS pincode TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS gender TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sr_no TEXT")
+
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS course TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS batch TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS admission_date TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS year_semester TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS academic_status TEXT DEFAULT 'REGULAR'")
+
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0")
+        cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP")
+
+        # ======================================================
+        # FACULTY TABLE (NEW)
+        # ======================================================
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS faculty(
+                faculty_id TEXT PRIMARY KEY,
+                name TEXT,
+                department TEXT,
+                mobile TEXT,
+                email TEXT,
+                designation TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                version INTEGER DEFAULT 1,
+                is_deleted INTEGER DEFAULT 0
+            )
+        """)
+
+        # ======================================================
+        # SUBJECTS
+        # ======================================================
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS subjects(
+                subject_id TEXT,
+                subject_name TEXT NOT NULL,
+                department TEXT,
+                semester TEXT,
+                type TEXT,
+                PRIMARY KEY (subject_id, semester, department)
+            )
+        """)
+
+        # ======================================================
+        # ROOMS
+        # ======================================================
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS rooms(
+            room_id TEXT PRIMARY KEY,
+            room_name TEXT,
+            capacity INTEGER,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    """)
+        """)
 
-    # ======================================================
-    # STUDENTS (SYNC SAFE + SESSION YEAR FIX)
-    # ======================================================
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS students(
-            sbrn TEXT PRIMARY KEY,
-            sync_id UUID,
-            name TEXT,
+        # ======================================================
+        # DEPARTMENTS
+        # ======================================================
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS departments(
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        # ======================================================
+        # FACULTY SUBJECT MAP (FIXED PRIMARY KEY)
+        # ======================================================
+
+        # 🔥 TEMP FORCE RESET (ONLY FOR 1ST DEPLOY)
+        cur.execute("DROP TABLE IF EXISTS faculty_subject_map CASCADE")
+
+        cur.execute("""
+        CREATE TABLE faculty_subject_map(
+            faculty_id TEXT,
+            subject_id TEXT,
             department TEXT,
             semester TEXT,
             section TEXT,
-            session_year TEXT,
-
-            mobile_no TEXT,
-            father_name TEXT,
-            district TEXT,
-            photo TEXT,
-
-            dob TEXT,
-            address TEXT,
-            state TEXT,
-            pincode TEXT,
-            gender TEXT,
-            sr_no TEXT,
-
-            course TEXT,
-            batch TEXT,
-            admission_date TEXT,
-            year_semester TEXT,
-
-            academic_status TEXT DEFAULT 'REGULAR',
-
             last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            version INTEGER DEFAULT 1,
-            sync_pending INTEGER DEFAULT 0,
-            is_deleted INTEGER DEFAULT 0,
-            deleted_at TIMESTAMP
+            PRIMARY KEY (faculty_id, subject_id, semester, department, section)
         )
-    """)
+        """)
+        # ======================================================
+        # TIMETABLE
+        # ======================================================
 
-    # ======================================================
-    # SAFE COLUMN REPAIR
-    # ======================================================
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS timetable_slots(
+                id SERIAL PRIMARY KEY,
+                department TEXT NOT NULL,
+                semester TEXT NOT NULL,
+                section TEXT NOT NULL,
+                day TEXT NOT NULL,
+                period_no INTEGER NOT NULL,
+                period_len INTEGER,
+                type TEXT,
+                subject_id TEXT,
+                faculty_id TEXT,
+                room TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                version INTEGER DEFAULT 1,
+                sync_pending INTEGER DEFAULT 0
+            )
+        """)
 
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_id UUID")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS session_year TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS mobile_no TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS father_name TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS district TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS photo TEXT")
+        # ======================================================
+        # SEMESTER DATES
+        # ======================================================
 
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS dob TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS address TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS state TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS pincode TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS gender TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sr_no TEXT")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS semester_dates(
+                department TEXT,
+                semester TEXT,
+                start_date DATE,
+                end_date DATE,
+                PRIMARY KEY (department, semester)
+            )
+        """)
 
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS course TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS batch TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS admission_date TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS year_semester TEXT")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS academic_status TEXT DEFAULT 'REGULAR'")
+        # ======================================================
+        # HOLIDAYS
+        # ======================================================
 
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0")
-    cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS holidays(
+                date DATE PRIMARY KEY,
+                description TEXT
+            )
+        """)
 
-    # ======================================================
-    # FACULTY TABLE (NEW)
-    # ======================================================
+        # ======================================================
+        # ATTENDANCE
+        # ======================================================
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS faculty(
-            faculty_id TEXT PRIMARY KEY,
-            name TEXT,
-            department TEXT,
-            mobile TEXT,
-            email TEXT,
-            designation TEXT,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            version INTEGER DEFAULT 1,
-            is_deleted INTEGER DEFAULT 0
-        )
-    """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS attendance_daily(
+                sbrn TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                semester TEXT NOT NULL,
+                section TEXT NOT NULL,
+                class_date DATE NOT NULL,
+                attended INTEGER NOT NULL,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (sbrn, subject_id, semester, section, class_date)
+            );
+        """)
 
-    # ======================================================
-    # SUBJECTS
-    # ======================================================
+        # ======================================================
+        # PERFORMANCE INDEXES
+        # ======================================================
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS subjects(
-            subject_id TEXT,
-            subject_name TEXT NOT NULL,
-            department TEXT,
-            semester TEXT,
-            type TEXT,
-            PRIMARY KEY (subject_id, semester, department)
-        )
-    """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_attendance_semester
+            ON attendance_daily (semester);
+        """)
 
-    # ======================================================
-    # ROOMS
-    # ======================================================
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_attendance_subject_id
+            ON attendance_daily (subject_id);
+        """)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS rooms(
-        room_id TEXT PRIMARY KEY,
-        room_name TEXT,
-        capacity INTEGER,
-        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_attendance_last_updated
+            ON attendance_daily (last_updated);
+        """)
 
-    # ======================================================
-    # DEPARTMENTS
-    # ======================================================
+        conn.commit()
+        release_db(conn)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS departments(
-        id SERIAL PRIMARY KEY,
-        name TEXT UNIQUE,
-        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
+        print("✅ PostgreSQL Server Ready (SYNC ENABLED)")
 
-    # ======================================================
-    # FACULTY SUBJECT MAP (FIXED PRIMARY KEY)
-    # ======================================================
+        threading.Thread(target=keep_server_awake, daemon=True).start()
 
-    # 🔥 TEMP FORCE RESET (ONLY FOR 1ST DEPLOY)
-    cur.execute("DROP TABLE IF EXISTS faculty_subject_map CASCADE")
-
-    cur.execute("""
-    CREATE TABLE faculty_subject_map(
-        faculty_id TEXT,
-        subject_id TEXT,
-        department TEXT,
-        semester TEXT,
-        section TEXT,
-        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (faculty_id, subject_id, semester, department, section)
-    )
-    """)
-    # ======================================================
-    # TIMETABLE
-    # ======================================================
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS timetable_slots(
-            id SERIAL PRIMARY KEY,
-            department TEXT NOT NULL,
-            semester TEXT NOT NULL,
-            section TEXT NOT NULL,
-            day TEXT NOT NULL,
-            period_no INTEGER NOT NULL,
-            period_len INTEGER,
-            type TEXT,
-            subject_id TEXT,
-            faculty_id TEXT,
-            room TEXT,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            version INTEGER DEFAULT 1,
-            sync_pending INTEGER DEFAULT 0
-        )
-    """)
-
-    # ======================================================
-    # SEMESTER DATES
-    # ======================================================
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS semester_dates(
-            department TEXT,
-            semester TEXT,
-            start_date DATE,
-            end_date DATE,
-            PRIMARY KEY (department, semester)
-        )
-    """)
-
-    # ======================================================
-    # HOLIDAYS
-    # ======================================================
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS holidays(
-            date DATE PRIMARY KEY,
-            description TEXT
-        )
-    """)
-
-    # ======================================================
-    # ATTENDANCE
-    # ======================================================
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS attendance_daily(
-            sbrn TEXT NOT NULL,
-            subject_id TEXT NOT NULL,
-            subject TEXT NOT NULL,
-            semester TEXT NOT NULL,
-            section TEXT NOT NULL,
-            class_date DATE NOT NULL,
-            attended INTEGER NOT NULL,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (sbrn, subject_id, semester, section, class_date)
-        );
-    """)
-
-    # ======================================================
-    # PERFORMANCE INDEXES
-    # ======================================================
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_attendance_semester
-        ON attendance_daily (semester);
-    """)
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_attendance_subject_id
-        ON attendance_daily (subject_id);
-    """)
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_attendance_last_updated
-        ON attendance_daily (last_updated);
-    """)
-
-    conn.commit()
-    release_db(conn)
-
-    print("✅ PostgreSQL Server Ready (SYNC ENABLED)")
-
-    threading.Thread(target=keep_server_awake, daemon=True).start()
+    except Exception as e:
+        import traceback
+        print("❌ STARTUP FAILED:")
+        traceback.print_exc()
+        raise e
 
 # ======================================================
 # LOGIN
