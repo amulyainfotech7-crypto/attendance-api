@@ -1,4 +1,5 @@
 import os
+import time
 import psycopg2
 from psycopg2 import OperationalError
 from psycopg2.pool import SimpleConnectionPool
@@ -32,10 +33,10 @@ else:
 DB_POOL = None
 
 
-def init_db_pool():
+def init_db_pool(retries=5):
     """
-    Initialize PostgreSQL connection pool.
-    Called once when FastAPI server starts.
+    Initialize PostgreSQL connection pool (Render-safe).
+    Includes retry + SSL fix + connection test.
     """
 
     global DB_POOL
@@ -46,41 +47,61 @@ def init_db_pool():
     if not DATABASE_URL:
         raise Exception("❌ DATABASE_URL not set")
 
-    try:
-        db_url = DATABASE_URL.strip()
+    db_url = DATABASE_URL.strip()
 
-        # --------------------------------------------------
-        # 🔥 FIX 1: Render URL compatibility
-        # --------------------------------------------------
-        if db_url.startswith("postgres://"):
-            db_url = db_url.replace("postgres://", "postgresql://", 1)
+    # --------------------------------------------------
+    # 🔥 FIX 1: Render URL compatibility
+    # --------------------------------------------------
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-        # --------------------------------------------------
-        # 🔥 INIT POOL (ENTERPRISE SAFE)
-        # --------------------------------------------------
-        DB_POOL = SimpleConnectionPool(
-            minconn=1,
-            maxconn=20,
-            dsn=db_url,
+    # --------------------------------------------------
+    # 🔥 FIX 2: FORCE SSL IN URL (CRITICAL)
+    # --------------------------------------------------
+    if "sslmode" not in db_url:
+        if "?" in db_url:
+            db_url += "&sslmode=require"
+        else:
+            db_url += "?sslmode=require"
 
-            # 🔐 SSL REQUIRED (Render)
-            sslmode="require",
+    print("🔍 Final DB URL:", db_url)
 
-            # ⏱ Timeout
-            connect_timeout=10,
+    # --------------------------------------------------
+    # 🔁 RETRY LOOP (Render cold start fix)
+    # --------------------------------------------------
+    for attempt in range(retries):
+        try:
+            DB_POOL = SimpleConnectionPool(
+                minconn=1,
+                maxconn=20,
+                dsn=db_url,
 
-            # 🔥 KEEPALIVE (PREVENT SSL DROP)
-            keepalives=1,
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=5
-        )
+                connect_timeout=10,
 
-        print("🚀 PostgreSQL connection pool initialized")
+                # 🔥 KEEPALIVE (PREVENT SSL DROP)
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5
+            )
 
-    except OperationalError as e:
-        print("❌ Failed to initialize DB pool:", e)
-        raise
+            # --------------------------------------------------
+            # ✅ TEST CONNECTION (VERY IMPORTANT)
+            # --------------------------------------------------
+            conn = DB_POOL.getconn()
+            cur = conn.cursor()
+            cur.execute("SELECT 1;")
+            cur.close()
+            DB_POOL.putconn(conn)
+
+            print("✅ PostgreSQL connection pool initialized & verified")
+            return
+
+        except Exception as e:
+            print(f"⚠ DB Retry {attempt + 1}/{retries} failed:", e)
+            time.sleep(3)
+
+    raise Exception("❌ Could not connect to DB after retries")
 
 
 # ======================================================
@@ -98,7 +119,8 @@ def connect_db():
 
         # 🔥 Safety: ensure connection alive
         if conn.closed:
-            print("⚠ Reconnecting closed DB connection...")
+            print("⚠ Connection was closed. Reinitializing pool...")
+            DB_POOL = None
             init_db_pool()
             conn = DB_POOL.getconn()
 
@@ -106,7 +128,12 @@ def connect_db():
 
     except Exception as e:
         print("❌ Failed to get DB connection:", e)
-        raise
+
+        # 🔥 HARD RECOVERY
+        DB_POOL = None
+        init_db_pool()
+
+        return DB_POOL.getconn()
 
 
 # ======================================================
@@ -134,6 +161,7 @@ def close_all_connections():
     try:
         if DB_POOL:
             DB_POOL.closeall()
+            DB_POOL = None
             print("🔌 All DB connections closed")
 
     except Exception as e:
