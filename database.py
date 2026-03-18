@@ -16,15 +16,22 @@ if env_path.exists():
     load_dotenv(dotenv_path=env_path)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+# 🔥 FORCE FIX FOR RENDER URL FORMAT
+if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgres://", 1)
 
 # ======================================================
 # DEBUG PRINT (SAFE)
 # ======================================================
 
 if DATABASE_URL:
+    safe_url = DATABASE_URL.split("@")[-1]
+    print("🌍 DATABASE_URL:", safe_url)
     print("✅ DATABASE_URL loaded successfully")
 else:
     print("❌ DATABASE_URL NOT FOUND")
+
+
 
 # ======================================================
 # CONNECTION POOL
@@ -64,7 +71,8 @@ def init_db_pool(retries=5):
         else:
             db_url += "?sslmode=require"
 
-    print("🔍 Final DB URL:", db_url)
+    safe_final = db_url.split("@")[-1]
+    print("🔍 Final DB URL:", safe_final)
 
     # --------------------------------------------------
     # 🔁 RETRY LOOP (Render cold start fix)
@@ -78,11 +86,12 @@ def init_db_pool(retries=5):
 
                 connect_timeout=10,
 
-                # 🔥 KEEPALIVE (PREVENT SSL DROP)
                 keepalives=1,
                 keepalives_idle=30,
                 keepalives_interval=10,
-                keepalives_count=5
+                keepalives_count=5,
+
+                options='-c statement_timeout=30000'
             )
 
             # --------------------------------------------------
