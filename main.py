@@ -547,22 +547,23 @@ def startup():
     """)
 
     # ======================================================
-    # FACULTY SUBJECT MAP
+    # FACULTY SUBJECT MAP (FIXED PRIMARY KEY)
     # ======================================================
 
+    # 🔥 TEMP FORCE RESET (ONLY FOR 1ST DEPLOY)
+    cur.execute("DROP TABLE IF EXISTS faculty_subject_map CASCADE")
+
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS faculty_subject_map(
-        id SERIAL PRIMARY KEY,
+    CREATE TABLE faculty_subject_map(
         faculty_id TEXT,
         subject_id TEXT,
         department TEXT,
         semester TEXT,
         section TEXT,
-        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (faculty_id, subject_id, semester, department, section)
     )
     """)
-
-
     # ======================================================
     # TIMETABLE
     # ======================================================
