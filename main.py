@@ -1103,7 +1103,7 @@ def get_timetable(department: str, semester: str, day: str):
 
 
 # ======================================================
-# SUBJECTS BY DATE
+# SUBJECTS BY DATE (FIXED WITH SECTION SUPPORT)
 # ======================================================
 
 @app.get("/subjects-by-date")
@@ -1131,15 +1131,23 @@ def get_subjects_by_date(department: str, semester: str, date: str):
             t.subject_id,
             COALESCE(s.subject_name, t.subject_id) AS subject_name,
             COALESCE(s.type, t.type) AS type,
+
+            -- 🔥 KEY FIX: get sections from timetable
+            STRING_AGG(DISTINCT t.section, ',') AS sections,
+
             MIN(t.period_no) AS first_period
+
         FROM timetable_slots t
+
         LEFT JOIN subjects s
           ON LOWER(TRIM(t.subject_id)) = LOWER(TRIM(s.subject_id))
          AND LOWER(TRIM(t.semester))   = LOWER(TRIM(s.semester))
          AND LOWER(TRIM(t.department)) = LOWER(TRIM(s.department))
+
         WHERE LOWER(TRIM(t.department)) = LOWER(TRIM(%s))
           AND LOWER(TRIM(t.semester))   = LOWER(TRIM(%s))
           AND LOWER(TRIM(t.day))        = LOWER(TRIM(%s))
+
         GROUP BY t.subject_id, s.subject_name, s.type, t.type
         ORDER BY first_period
     """, (department, semester, weekday_short))
@@ -1153,7 +1161,10 @@ def get_subjects_by_date(department: str, semester: str, date: str):
         {
             "subject_id": r[0],
             "subject_name": r[1],
-            "type": r[2]
+            "type": r[2],
+
+            # 🔥 IMPORTANT: convert "A,B" → ["A","B"]
+            "sections": r[3].split(",") if r[3] else []
         }
         for r in rows
     ]
