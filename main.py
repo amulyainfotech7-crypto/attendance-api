@@ -1103,7 +1103,7 @@ def get_timetable(department: str, semester: str, day: str):
 
 
 # ======================================================
-# SUBJECTS BY DATE (FINAL FIXED WITH CLEAN SECTION SUPPORT)
+# SUBJECTS BY DATE (FIXED WITH SECTION SUPPORT)
 # ======================================================
 
 @app.get("/subjects-by-date")
@@ -1132,8 +1132,8 @@ def get_subjects_by_date(department: str, semester: str, date: str):
             COALESCE(s.subject_name, t.subject_id) AS subject_name,
             COALESCE(s.type, t.type) AS type,
 
-            -- 🔥 SECTION AGGREGATION
-            STRING_AGG(DISTINCT TRIM(t.section), ',') AS sections,
+            -- 🔥 KEY FIX: get sections from timetable
+            STRING_AGG(DISTINCT t.section, ',') AS sections,
 
             MIN(t.period_no) AS first_period
 
@@ -1157,34 +1157,14 @@ def get_subjects_by_date(department: str, semester: str, date: str):
 
     print("DEBUG subjects found:", len(rows))
 
-    # ======================================================
-    # 🔥 SECTION NORMALIZER (CRITICAL FIX)
-    # ======================================================
-    def normalize_sections(section_str):
-        if not section_str:
-            return []
-
-        section_str = section_str.strip().upper()
-
-        # 🔥 Handle combined values
-        if section_str in ("ALL", "A+B"):
-            return ["A", "B"]
-
-        # 🔥 Split + clean
-        sections = [s.strip() for s in section_str.split(",") if s.strip()]
-
-        # 🔥 Remove duplicates safely
-        return sorted(list(set(sections)))
-
-    # ======================================================
-    # 🔥 FINAL RESPONSE
-    # ======================================================
     return [
         {
             "subject_id": r[0],
             "subject_name": r[1],
             "type": r[2],
-            "sections": normalize_sections(r[3])   # ✅ FINAL FIX
+
+            # 🔥 IMPORTANT: convert "A,B" → ["A","B"]
+            "sections": r[3].split(",") if r[3] else []
         }
         for r in rows
     ]
