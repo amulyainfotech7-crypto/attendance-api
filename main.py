@@ -20,39 +20,6 @@ import threading
 import requests
 import time
 
-
-# ======================================================
-# 🔥 EMBEDDED FASTAPI SERVER (BACKGROUND MODE)
-# ======================================================
-import uvicorn
-import socket
-
-def is_port_in_use(port=8000):
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            return s.connect_ex(("127.0.0.1", port)) == 0
-    except:
-        return False
-
-def start_fastapi():
-    try:
-        if is_port_in_use(8000):
-            print("⚠ FastAPI already running on port 8000")
-            return
-
-        print("🚀 Starting embedded FastAPI server...")
-
-        uvicorn.run(
-            "main:app",   # ⚠ IMPORTANT (this file name)
-            host="127.0.0.1",
-            port=8000,
-            log_level="error"   # silent mode
-        )
-
-    except Exception as e:
-        print("❌ FastAPI failed:", e)
-
-
 app = FastAPI()
 
 # ======================================================
@@ -453,15 +420,6 @@ def startup():
 
     print("🚀 APP STARTING...")
 
-    # ======================================================
-    # 🔥 START EMBEDDED FASTAPI (BACKGROUND THREAD)
-    # ======================================================
-    threading.Thread(
-        target=start_fastapi,
-        daemon=True
-    ).start()
-
-    
     try:
         import os
         db_url = os.getenv("DATABASE_URL", "")
