@@ -323,7 +323,8 @@ SYNC_TABLES = {
     "faculty",
     "rooms",
     "departments",
-    "faculty_subject_map"
+    "faculty_subject_map",
+    "activity_attendance"
 }
 
 
@@ -661,6 +662,34 @@ def startup():
             );
         """)
 
+        # ======================================================
+        # ACTIVITY ATTENDANCE (NEW)
+        # ======================================================
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS activity_attendance(
+                id SERIAL PRIMARY KEY,
+
+                sbrn TEXT NOT NULL,
+                activity_type TEXT,
+                activity_name TEXT,
+                date DATE,
+                weightage DOUBLE PRECISION DEFAULT 1,
+
+                semester TEXT,
+                section TEXT,
+
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                version INTEGER DEFAULT 1,
+                sync_pending INTEGER DEFAULT 0
+            )
+        """)
+
+        # 🔥 PERFORMANCE INDEX (IMPORTANT)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_activity_lookup
+            ON activity_attendance (sbrn, semester, date)
+        """)
         # ======================================================
         # PERFORMANCE INDEXES
         # ======================================================
