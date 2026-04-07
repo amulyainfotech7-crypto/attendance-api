@@ -519,6 +519,11 @@ def startup():
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0")
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0")
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP")
+        # 🔒 MANUAL DETENTION LOCK COLUMN (FINAL FIX)
+        cur.execute("""
+            ALTER TABLE students
+            ADD COLUMN IF NOT EXISTS status_locked INTEGER DEFAULT 0
+        """)
 
         # ======================================================
         # FACULTY TABLE (NEW)
@@ -1671,7 +1676,13 @@ def sync_students(records: list = Body(...)):
         batch = EXCLUDED.batch,
         admission_date = EXCLUDED.admission_date,
         year_semester = EXCLUDED.year_semester,
-        academic_status = EXCLUDED.academic_status,
+
+        academic_status = CASE
+            WHEN students.status_locked = 1 THEN students.academic_status
+            ELSE EXCLUDED.academic_status
+        END,
+
+        
 
         last_updated = EXCLUDED.last_updated,
         version = EXCLUDED.version,
