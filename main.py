@@ -1205,7 +1205,7 @@ def get_subjects_by_date(department: str, semester: str, date: str):
 
 
 # ======================================================
-# GET STUDENTS (SYNC SAFE VERSION)
+# GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
 # ======================================================
 
 @app.get("/students")
@@ -1222,14 +1222,19 @@ def get_students(department: str, semester: str, section: str):
         if section.lower() == "all":
 
             cur.execute("""
-                SELECT sbrn,
-                       name,
-                       department,
-                       semester,
-                       section
+                SELECT
+                    sbrn,
+                    name,
+                    department,
+                    semester,
+                    section
                 FROM students
                 WHERE LOWER(COALESCE(department,'')) = LOWER(%s)
                   AND LOWER(COALESCE(semester,''))   = LOWER(%s)
+
+                  -- 🔥 REMOVE ONLY MANUAL DETAINED STUDENTS
+                  AND COALESCE(status_locked,0) = 0
+
                 ORDER BY sbrn
             """, (department, semester))
 
@@ -1239,15 +1244,20 @@ def get_students(department: str, semester: str, section: str):
         else:
 
             cur.execute("""
-                SELECT sbrn,
-                       name,
-                       department,
-                       semester,
-                       section
+                SELECT
+                    sbrn,
+                    name,
+                    department,
+                    semester,
+                    section
                 FROM students
                 WHERE LOWER(COALESCE(department,'')) = LOWER(%s)
                   AND LOWER(COALESCE(semester,''))   = LOWER(%s)
                   AND LOWER(COALESCE(section,''))    = LOWER(%s)
+
+                  -- 🔥 REMOVE ONLY MANUAL DETAINED STUDENTS
+                  AND COALESCE(status_locked,0) = 0
+
                 ORDER BY sbrn
             """, (department, semester, section))
 
@@ -1259,6 +1269,9 @@ def get_students(department: str, semester: str, section: str):
 
     release_db(conn)
 
+    # ======================================================
+    # RESPONSE FORMAT
+    # ======================================================
     return [
         {
             "sbrn": r[0],
