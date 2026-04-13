@@ -1896,9 +1896,9 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
 
     try:
 
-        # --------------------------------------------------
-        # 🔴 CRITICAL FIX: FORCE academic_status PRESERVATION
-        # --------------------------------------------------
+        # ======================================================
+        # 🔴 FINAL STATUS PROTECTION (STRUCK_OFF FIX)
+        # ======================================================
         if table_name == "students":
 
             for row in records:
@@ -1908,7 +1908,9 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
                 if not sbrn:
                     continue
 
-                # Get existing status
+                # ----------------------------------------
+                # Get existing status from DB
+                # ----------------------------------------
                 cur.execute("""
                     SELECT academic_status
                     FROM students
@@ -1917,18 +1919,39 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
 
                 existing = cur.fetchone()
 
-                # If missing → preserve
-                if "academic_status" not in row or not row["academic_status"]:
+                existing_status = (existing[0] if existing else "").upper()
+                incoming_status = (row.get("academic_status") or "").upper()
 
+                print(f"🔍 STATUS CHECK → {sbrn} | DB={existing_status} | IN={incoming_status}")
+
+                # ----------------------------------------
+                # 🚨 RULE 1: NEVER downgrade STRUCK_OFF
+                # ----------------------------------------
+                if existing_status == "STRUCK_OFF":
+                    row["academic_status"] = "STRUCK_OFF"
+
+                # ----------------------------------------
+                # 🚨 RULE 2: ALWAYS accept STRUCK_OFF
+                # ----------------------------------------
+                elif incoming_status == "STRUCK_OFF":
+                    row["academic_status"] = "STRUCK_OFF"
+
+                # ----------------------------------------
+                # 🚨 RULE 3: preserve if missing
+                # ----------------------------------------
+                elif not incoming_status:
                     if existing:
-                        row["academic_status"] = existing[0]
+                        row["academic_status"] = existing_status
                     else:
-                        row["academic_status"] = "ACTIVE"
+                        row["academic_status"] = "REGULAR"
 
-                # Force uppercase
-                row["academic_status"] = row["academic_status"].upper()
+                # ----------------------------------------
+                # NORMAL CASE
+                # ----------------------------------------
+                else:
+                    row["academic_status"] = incoming_status
 
-                print("🔥 SYNC STATUS:", row["academic_status"])
+                print("🔥 FINAL STATUS:", row["academic_status"])
 
         # --------------------------------------------------
         # Detect table columns
