@@ -1257,6 +1257,7 @@ def get_students(department: str, semester: str, section: str):
 
                   -- 🔥 REMOVE ONLY MANUAL DETAINED STUDENTS
                   AND COALESCE(status_locked,0) = 0
+                  AND UPPER(COALESCE(academic_status,'ACTIVE')) = 'ACTIVE'
 
                 ORDER BY sbrn
             """, (department, semester, section))
