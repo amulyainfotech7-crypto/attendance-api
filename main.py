@@ -1234,7 +1234,7 @@ def get_students(department: str, semester: str, section: str):
 
                   -- 🔥 REMOVE ONLY MANUAL DETAINED STUDENTS
                   AND COALESCE(status_locked,0) = 0
-
+                  AND UPPER(COALESCE(academic_status,'ACTIVE')) = 'ACTIVE'
                 ORDER BY sbrn
             """, (department, semester))
 
@@ -1896,6 +1896,40 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
     try:
 
         # --------------------------------------------------
+        # 🔴 CRITICAL FIX: FORCE academic_status PRESERVATION
+        # --------------------------------------------------
+        if table_name == "students":
+
+            for row in records:
+
+                sbrn = row.get("sbrn")
+
+                if not sbrn:
+                    continue
+
+                # Get existing status
+                cur.execute("""
+                    SELECT academic_status
+                    FROM students
+                    WHERE sbrn=%s
+                """, (sbrn,))
+
+                existing = cur.fetchone()
+
+                # If missing → preserve
+                if "academic_status" not in row or not row["academic_status"]:
+
+                    if existing:
+                        row["academic_status"] = existing[0]
+                    else:
+                        row["academic_status"] = "ACTIVE"
+
+                # Force uppercase
+                row["academic_status"] = row["academic_status"].upper()
+
+                print("🔥 SYNC STATUS:", row["academic_status"])
+
+        # --------------------------------------------------
         # Detect table columns
         # --------------------------------------------------
         cur.execute("""
@@ -1910,7 +1944,7 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
             raise HTTPException(status_code=400, detail="Table not found")
 
         # --------------------------------------------------
-        # Detect PRIMARY KEY automatically
+        # Detect PRIMARY KEY
         # --------------------------------------------------
         cur.execute("""
             SELECT a.attname
@@ -1933,9 +1967,20 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         conflict_key = "(" + ",".join(pk_columns) + ")"
 
         # --------------------------------------------------
-        # Filter valid columns from incoming data
+        # 🔴 FIX: COLLECT ALL VALID COLUMNS FROM ALL RECORDS
         # --------------------------------------------------
-        columns = [c for c in records[0].keys() if c in valid_columns]
+        all_columns = set()
+
+        for r in records:
+            for c in r.keys():
+                if c in valid_columns:
+                    all_columns.add(c)
+
+        # 🔴 Ensure academic_status always included
+        if table_name == "students":
+            all_columns.add("academic_status")
+
+        columns = list(all_columns)
 
         if not columns:
             raise HTTPException(status_code=400, detail="No valid columns")
@@ -1954,6 +1999,14 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         DO UPDATE SET
         {update_cols};
         """
+
+        # --------------------------------------------------
+        # 🔴 Ensure all rows have all columns
+        # --------------------------------------------------
+        for r in records:
+            for c in columns:
+                if c not in r:
+                    r[c] = None
 
         execute_batch(cur, query, records)
 
