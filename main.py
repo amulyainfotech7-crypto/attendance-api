@@ -1696,14 +1696,23 @@ def sync_students(records: list = Body(...)):
             ELSE EXCLUDED.academic_status
         END,
 
+        
+
         last_updated = EXCLUDED.last_updated,
         version = EXCLUDED.version,
         is_deleted = EXCLUDED.is_deleted,
         deleted_at = EXCLUDED.deleted_at
 
     WHERE 
+    (
         students.version < EXCLUDED.version
-        OR students.academic_status != EXCLUDED.academic_status;
+    )
+    OR
+    (
+        students.version = EXCLUDED.version
+        AND COALESCE(students.status_priority,0) < COALESCE(EXCLUDED.status_priority,0)
+    );
+    """
 
     try:
 
