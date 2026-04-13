@@ -1928,7 +1928,11 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
                 # 🚨 RULE 1: NEVER downgrade STRUCK_OFF
                 # ----------------------------------------
                 if existing_status == "STRUCK_OFF":
-                    row["academic_status"] = "STRUCK_OFF"
+
+                    if incoming_status == "ACTIVE":
+                        row["academic_status"] = "ACTIVE"
+                    else:
+                        row["academic_status"] = "STRUCK_OFF"
 
                 # ----------------------------------------
                 # 🚨 RULE 2: ALWAYS accept STRUCK_OFF
