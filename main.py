@@ -2156,6 +2156,86 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
     }
 
 
+@app.post("/sync/result_subjects")
+def sync_result_subjects(records: list = Body(...)):
+
+    if not records:
+        return {"status": "no_data"}
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        execute_batch(cur, """
+            INSERT INTO result_subjects
+            (id, sbrn, semester, subject_id, attempt,
+             marks_obtained, max_marks, grade, status, last_updated)
+            VALUES
+            (%(id)s, %(sbrn)s, %(semester)s, %(subject_id)s, %(attempt)s,
+             %(marks_obtained)s, %(max_marks)s, %(grade)s, %(status)s, %(last_updated)s)
+
+            ON CONFLICT (id)
+            DO UPDATE SET
+                marks_obtained = EXCLUDED.marks_obtained,
+                grade = EXCLUDED.grade,
+                status = EXCLUDED.status,
+                last_updated = EXCLUDED.last_updated;
+        """, records)
+
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        release_db(conn)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    release_db(conn)
+
+    return {"status": "success", "rows": len(records)}
+
+
+
+@app.post("/sync/results_semester")
+def sync_results_semester(records: list = Body(...)):
+
+    if not records:
+        return {"status": "no_data"}
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        execute_batch(cur, """
+            INSERT INTO results_semester
+            (id, sbrn, semester, attempt,
+             total_marks, percentage, result_status,
+             sgpa, created_at, last_updated)
+
+            VALUES
+            (%(id)s, %(sbrn)s, %(semester)s, %(attempt)s,
+             %(total_marks)s, %(percentage)s, %(result_status)s,
+             %(sgpa)s, %(created_at)s, %(last_updated)s)
+
+            ON CONFLICT (id)
+            DO UPDATE SET
+                percentage = EXCLUDED.percentage,
+                result_status = EXCLUDED.result_status,
+                sgpa = EXCLUDED.sgpa,
+                last_updated = EXCLUDED.last_updated;
+        """, records)
+
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        release_db(conn)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    release_db(conn)
+
+    return {"status": "success", "rows": len(records)}
+
+
 # ======================================================
 # 🔥 SYNC ATTENDANCE (DESKTOP → CLOUD)
 # ======================================================
