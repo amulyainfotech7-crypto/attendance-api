@@ -2162,37 +2162,70 @@ def sync_result_subjects(records: list = Body(...)):
     if not records:
         return {"status": "no_data"}
 
+    def safe_float(val):
+        try:
+            return float(val)
+        except:
+            return None
+
     conn = connect_db()
     cur = conn.cursor()
 
+    clean_records = []
+
+    for r in records:
+        try:
+            clean = {
+                "id": r.get("id"),
+                "sbrn": r.get("sbrn"),
+                "semester": r.get("semester"),
+                "subject_id": r.get("subject_id"),
+                "attempt": r.get("attempt"),
+
+                # 🔥 FIX: force numeric
+                "marks_obtained": safe_float(r.get("marks_obtained")),
+                "max_marks": safe_float(r.get("max_marks")),
+
+                "grade": r.get("grade"),
+                "status": r.get("status"),
+                "last_updated": r.get("last_updated")
+            }
+
+            print("🚀 CLEAN SUBJECT RECORD:", clean)
+            clean_records.append(clean)
+
+        except Exception as e:
+            print("❌ Skip bad record:", r, e)
+
     try:
         execute_batch(cur, """
-            INSERT INTO result_subjects
-            (id, sbrn, semester, subject_id, attempt,
-             marks_obtained, max_marks, grade, status, last_updated)
-            VALUES
-            (%(id)s, %(sbrn)s, %(semester)s, %(subject_id)s, %(attempt)s,
-             %(marks_obtained)s, %(max_marks)s, %(grade)s, %(status)s, %(last_updated)s)
-
+            INSERT INTO result_subjects (
+                id, sbrn, semester, subject_id, attempt,
+                marks_obtained, max_marks, grade, status, last_updated
+            )
+            VALUES (
+                %(id)s, %(sbrn)s, %(semester)s, %(subject_id)s, %(attempt)s,
+                %(marks_obtained)s, %(max_marks)s, %(grade)s, %(status)s, %(last_updated)s
+            )
             ON CONFLICT (id)
             DO UPDATE SET
                 marks_obtained = EXCLUDED.marks_obtained,
                 grade = EXCLUDED.grade,
                 status = EXCLUDED.status,
                 last_updated = EXCLUDED.last_updated;
-        """, records)
+        """, clean_records)
 
         conn.commit()
 
     except Exception as e:
         conn.rollback()
-        release_db(conn)
+        print("❌ result_subjects sync error:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    release_db(conn)
+    finally:
+        release_db(conn)
 
-    return {"status": "success", "rows": len(records)}
-
+    return {"status": "success", "rows": len(clean_records)}
 
 
 @app.post("/sync/results_semester")
@@ -2201,39 +2234,71 @@ def sync_results_semester(records: list = Body(...)):
     if not records:
         return {"status": "no_data"}
 
+    def safe_float(val):
+        try:
+            return float(val)
+        except:
+            return None
+
     conn = connect_db()
     cur = conn.cursor()
 
+    clean_records = []
+
+    for r in records:
+        try:
+            clean = {
+                "id": r.get("id"),
+                "sbrn": r.get("sbrn"),
+                "semester": r.get("semester"),
+                "attempt": r.get("attempt"),
+
+                "total_marks": safe_float(r.get("total_marks")),
+                "percentage": safe_float(r.get("percentage")),
+                "result_status": r.get("result_status"),
+
+                "sgpa": safe_float(r.get("sgpa")),
+                "created_at": r.get("created_at"),
+                "last_updated": r.get("last_updated")
+            }
+
+            print("🚀 CLEAN SEMESTER RECORD:", clean)
+            clean_records.append(clean)
+
+        except Exception as e:
+            print("❌ Skip bad semester record:", r, e)
+
     try:
         execute_batch(cur, """
-            INSERT INTO results_semester
-            (id, sbrn, semester, attempt,
-             total_marks, percentage, result_status,
-             sgpa, created_at, last_updated)
-
-            VALUES
-            (%(id)s, %(sbrn)s, %(semester)s, %(attempt)s,
-             %(total_marks)s, %(percentage)s, %(result_status)s,
-             %(sgpa)s, %(created_at)s, %(last_updated)s)
-
+            INSERT INTO results_semester (
+                id, sbrn, semester, attempt,
+                total_marks, percentage, result_status,
+                sgpa, created_at, last_updated
+            )
+            VALUES (
+                %(id)s, %(sbrn)s, %(semester)s, %(attempt)s,
+                %(total_marks)s, %(percentage)s, %(result_status)s,
+                %(sgpa)s, %(created_at)s, %(last_updated)s
+            )
             ON CONFLICT (id)
             DO UPDATE SET
                 percentage = EXCLUDED.percentage,
                 result_status = EXCLUDED.result_status,
                 sgpa = EXCLUDED.sgpa,
                 last_updated = EXCLUDED.last_updated;
-        """, records)
+        """, clean_records)
 
         conn.commit()
 
     except Exception as e:
         conn.rollback()
-        release_db(conn)
+        print("❌ results_semester sync error:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    release_db(conn)
+    finally:
+        release_db(conn)
 
-    return {"status": "success", "rows": len(records)}
+    return {"status": "success", "rows": len(clean_records)}
 
 
 # ======================================================
