@@ -319,12 +319,15 @@ SYNC_TABLES = {
     "semester_dates",
     "holidays",
 
-    # 🔥 ADD THESE
     "faculty",
     "rooms",
     "departments",
     "faculty_subject_map",
-    "activity_attendance"
+    "activity_attendance",
+
+    # 🔥 CRITICAL (RESULT SYNC FIX)
+    "result_subjects",
+    "results_semester"
 }
 
 
