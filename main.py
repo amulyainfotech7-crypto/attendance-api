@@ -251,6 +251,119 @@ def sync_schema(schema: dict = Body(...)):
     }
 
 
+from fastapi import Body
+
+@app.post("/sync")
+def sync_data(payload: dict = Body(...)):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        for table, rows in payload.items():
+
+            print(f"🔥 SYNC TABLE: {table} ({len(rows)} rows)")
+
+            for row in rows:
+
+                print("➡ ROW:", row)
+
+                # ===============================
+                # RESULTS SEMESTER (FIXED)
+                # ===============================
+                if table == "results_semester":
+
+                    cur.execute("""
+                        INSERT INTO results_semester (
+                            sbrn, semester, attempt,
+                            total_marks, percentage, result_status,
+                            sgpa, last_updated, version
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+
+                        ON CONFLICT (sbrn, semester, attempt)
+                        DO UPDATE SET
+                            total_marks = EXCLUDED.total_marks,
+                            percentage = EXCLUDED.percentage,
+                            result_status = EXCLUDED.result_status,
+                            sgpa = EXCLUDED.sgpa,
+                            last_updated = EXCLUDED.last_updated,
+                            version = EXCLUDED.version
+                    """, (
+                        row["sbrn"],
+                        row["semester"],
+                        row["attempt"],
+                        row.get("total_marks"),
+                        row.get("percentage"),
+                        row.get("result_status"),
+                        row.get("sgpa"),
+                        row.get("last_updated"),
+                        row.get("version", 1)
+                    ))
+
+                # ===============================
+                # RESULT SUBJECTS (FIXED)
+                # ===============================
+                elif table == "result_subjects":
+
+                    cur.execute("""
+                        INSERT INTO result_subjects (
+                            sbrn, semester, subject_id, attempt,
+                            marks_obtained, max_marks,
+                            grade, status,
+                            last_updated, version
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+
+                        ON CONFLICT (sbrn, semester, subject_id, attempt)
+                        DO UPDATE SET
+                            marks_obtained = EXCLUDED.marks_obtained,
+                            max_marks = EXCLUDED.max_marks,
+                            grade = EXCLUDED.grade,
+                            status = EXCLUDED.status,
+                            last_updated = EXCLUDED.last_updated,
+                            version = EXCLUDED.version
+                    """, (
+                        row["sbrn"],
+                        row["semester"],
+                        row["subject_id"],
+                        row["attempt"],
+                        row.get("marks_obtained"),
+                        row.get("max_marks"),
+                        row.get("grade"),
+                        row.get("status"),
+                        row.get("last_updated"),
+                        row.get("version", 1)
+                    ))
+
+                # ===============================
+                # OTHER TABLES (KEEP EXISTING)
+                # ===============================
+                else:
+                    # your existing logic for students, faculty, etc.
+                    pass
+
+        conn.commit()
+
+        return {
+            "status": "success",
+            "message": "Sync completed"
+        }
+
+    except Exception as e:
+
+        conn.rollback()
+        print("❌ SYNC ERROR:", e)
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+    finally:
+        release_db(conn)
+
 # ======================================================
 # REALTIME WEBSOCKET CHANNEL
 # ======================================================
