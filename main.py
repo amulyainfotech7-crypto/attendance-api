@@ -549,7 +549,7 @@ def startup():
         conn = connect_db()
         cur = conn.cursor()
 
-        cur.execute("SELECT 1;")
+        cur.execute("SELECT 1")
         print("✅ DB TEST SUCCESS")
 
 
@@ -2561,6 +2561,7 @@ def reset_timetable_from_desktop(department: str, semester: str):
         raise HTTPException(status_code=500, detail=str(e))
     
 @app.delete("/sync/full-reset")
+@app.post("/admin/full-reset-cloud")
 def full_reset_cloud(secret: str):
 
     # 🔐 SECURITY CHECK
@@ -2571,10 +2572,11 @@ def full_reset_cloud(secret: str):
     cur = conn.cursor()
 
     try:
+        # 🔍 Get all tables
         cur.execute("""
             SELECT tablename
             FROM pg_tables
-            WHERE schemaname='public';
+            WHERE schemaname='public'
         """)
 
         tables = [row[0] for row in cur.fetchall()]
@@ -2583,18 +2585,25 @@ def full_reset_cloud(secret: str):
 
         for table in tables:
             if table not in protected:
-                cur.execute(f'TRUNCATE TABLE "{table}" RESTART IDENTITY CASCADE;')
+
+                print(f"⚠️ Truncating table: {table}")
+
+                # ✅ FIX: NO semicolon
+                cur.execute(f'TRUNCATE TABLE "{table}" RESTART IDENTITY CASCADE')
 
         conn.commit()
+        print("✅ CLOUD RESET COMPLETE")
 
     except Exception as e:
         conn.rollback()
+        print("❌ RESET ERROR:", e)
         release_db(conn)
         raise HTTPException(status_code=500, detail=str(e))
 
     release_db(conn)
 
     return {"status": "cloud_reset_complete"}
+
 
 # ======================================================
 # 🚀 ENTERPRISE FULL DATABASE SYNC (DELTA MODE)
