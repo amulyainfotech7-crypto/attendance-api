@@ -1996,6 +1996,8 @@ def sync_students_from_cloud(
 # ======================================================
 
 @app.post("/sync-generic/{table_name}")
+
+@app.post("/sync-generic/{table_name}")
 def universal_sync_upload(table_name: str, records: list = Body(...)):
 
     allowed_tables = get_sync_tables()
@@ -2023,9 +2025,6 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
                 if not sbrn:
                     continue
 
-                # ----------------------------------------
-                # Get existing status from DB
-                # ----------------------------------------
                 cur.execute("""
                     SELECT academic_status
                     FROM students
@@ -2037,40 +2036,17 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
                 existing_status = (existing[0] if existing else "").upper()
                 incoming_status = (row.get("academic_status") or "").upper()
 
-                print(f"🔍 STATUS CHECK → {sbrn} | DB={existing_status} | IN={incoming_status}")
-
-                # ----------------------------------------
-                # 🚨 RULE 1: NEVER downgrade STRUCK_OFF
-                # ----------------------------------------
                 if existing_status == "STRUCK_OFF":
+                    row["academic_status"] = "ACTIVE" if incoming_status == "ACTIVE" else "STRUCK_OFF"
 
-                    if incoming_status == "ACTIVE":
-                        row["academic_status"] = "ACTIVE"
-                    else:
-                        row["academic_status"] = "STRUCK_OFF"
-
-                # ----------------------------------------
-                # 🚨 RULE 2: ALWAYS accept STRUCK_OFF
-                # ----------------------------------------
                 elif incoming_status == "STRUCK_OFF":
                     row["academic_status"] = "STRUCK_OFF"
 
-                # ----------------------------------------
-                # 🚨 RULE 3: preserve if missing
-                # ----------------------------------------
                 elif not incoming_status:
-                    if existing:
-                        row["academic_status"] = existing_status
-                    else:
-                        row["academic_status"] = "REGULAR"
+                    row["academic_status"] = existing_status if existing else "REGULAR"
 
-                # ----------------------------------------
-                # NORMAL CASE
-                # ----------------------------------------
                 else:
                     row["academic_status"] = incoming_status
-
-                print("🔥 FINAL STATUS:", row["academic_status"])
 
         # --------------------------------------------------
         # Detect table columns
@@ -2110,7 +2086,7 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         conflict_key = "(" + ",".join(pk_columns) + ")"
 
         # --------------------------------------------------
-        # 🔴 FIX: COLLECT ALL VALID COLUMNS FROM ALL RECORDS
+        # Collect all valid columns
         # --------------------------------------------------
         all_columns = set()
 
@@ -2119,7 +2095,6 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
                 if c in valid_columns:
                     all_columns.add(c)
 
-        # 🔴 Ensure academic_status always included
         if table_name == "students":
             all_columns.add("academic_status")
 
@@ -2135,16 +2110,17 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
             [f"{c}=EXCLUDED.{c}" for c in columns if c not in pk_columns]
         )
 
+        # 🔥 FINAL FIX (NO SEMICOLON)
         query = f"""
         INSERT INTO "{table_name}" ({cols})
         VALUES ({vals})
         ON CONFLICT {conflict_key}
         DO UPDATE SET
-        {update_cols};
+        {update_cols}
         """
 
         # --------------------------------------------------
-        # 🔴 Ensure all rows have all columns
+        # Ensure all rows have all columns
         # --------------------------------------------------
         for r in records:
             for c in columns:
@@ -2166,6 +2142,8 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         conn.rollback()
         release_db(conn)
 
+        print("❌ SYNC ERROR:", e)
+
         raise HTTPException(status_code=500, detail=str(e))
 
     release_db(conn)
@@ -2174,6 +2152,7 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         "status": "success",
         "rows": len(records)
     }
+
 
 # ======================================================
 # UNIVERSAL SYNC DOWNLOAD (SAFE + FAST)
@@ -2294,7 +2273,6 @@ def sync_result_subjects(records: list = Body(...)):
                 "subject_id": r.get("subject_id"),
                 "attempt": r.get("attempt"),
 
-                # 🔥 FIX: force numeric
                 "marks_obtained": safe_float(r.get("marks_obtained")),
                 "max_marks": safe_float(r.get("max_marks")),
 
@@ -2319,12 +2297,13 @@ def sync_result_subjects(records: list = Body(...)):
                 %(id)s, %(sbrn)s, %(semester)s, %(subject_id)s, %(attempt)s,
                 %(marks_obtained)s, %(max_marks)s, %(grade)s, %(status)s, %(last_updated)s
             )
-            ON CONFLICT (id)
+            ON CONFLICT (sbrn, semester, subject_id, attempt)
             DO UPDATE SET
                 marks_obtained = EXCLUDED.marks_obtained,
+                max_marks = EXCLUDED.max_marks,
                 grade = EXCLUDED.grade,
                 status = EXCLUDED.status,
-                last_updated = EXCLUDED.last_updated;
+                last_updated = EXCLUDED.last_updated
         """, clean_records)
 
         conn.commit()
@@ -2338,6 +2317,7 @@ def sync_result_subjects(records: list = Body(...)):
         release_db(conn)
 
     return {"status": "success", "rows": len(clean_records)}
+
 
 
 @app.post("/sync/results_semester")
@@ -2392,12 +2372,13 @@ def sync_results_semester(records: list = Body(...)):
                 %(total_marks)s, %(percentage)s, %(result_status)s,
                 %(sgpa)s, %(created_at)s, %(last_updated)s
             )
-            ON CONFLICT (id)
+            ON CONFLICT (sbrn, semester, attempt)
             DO UPDATE SET
+                total_marks = EXCLUDED.total_marks,
                 percentage = EXCLUDED.percentage,
                 result_status = EXCLUDED.result_status,
                 sgpa = EXCLUDED.sgpa,
-                last_updated = EXCLUDED.last_updated;
+                last_updated = EXCLUDED.last_updated
         """, clean_records)
 
         conn.commit()
@@ -2411,7 +2392,6 @@ def sync_results_semester(records: list = Body(...)):
         release_db(conn)
 
     return {"status": "success", "rows": len(clean_records)}
-
 
 # ======================================================
 # 🔥 SYNC ATTENDANCE (DESKTOP → CLOUD)
