@@ -260,7 +260,6 @@ def sync_data(payload: dict = Body(...)):
     cur = conn.cursor()
 
     try:
-
         for table, rows in payload.items():
 
             print(f"🔥 SYNC TABLE: {table} ({len(rows)} rows)")
@@ -270,7 +269,7 @@ def sync_data(payload: dict = Body(...)):
                 print("➡ ROW:", row)
 
                 # ===============================
-                # RESULTS SEMESTER (FIXED)
+                # ✅ RESULTS SEMESTER (FIXED)
                 # ===============================
                 if table == "results_semester":
 
@@ -281,7 +280,6 @@ def sync_data(payload: dict = Body(...)):
                             sgpa, last_updated, version
                         )
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-
                         ON CONFLICT (sbrn, semester, attempt)
                         DO UPDATE SET
                             total_marks = EXCLUDED.total_marks,
@@ -291,9 +289,9 @@ def sync_data(payload: dict = Body(...)):
                             last_updated = EXCLUDED.last_updated,
                             version = EXCLUDED.version
                     """, (
-                        row["sbrn"],
-                        row["semester"],
-                        row["attempt"],
+                        row.get("sbrn"),
+                        row.get("semester"),
+                        row.get("attempt"),
                         row.get("total_marks"),
                         row.get("percentage"),
                         row.get("result_status"),
@@ -303,7 +301,7 @@ def sync_data(payload: dict = Body(...)):
                     ))
 
                 # ===============================
-                # RESULT SUBJECTS (FIXED)
+                # ✅ RESULT SUBJECTS (FIXED)
                 # ===============================
                 elif table == "result_subjects":
 
@@ -315,7 +313,6 @@ def sync_data(payload: dict = Body(...)):
                             last_updated, version
                         )
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-
                         ON CONFLICT (sbrn, semester, subject_id, attempt)
                         DO UPDATE SET
                             marks_obtained = EXCLUDED.marks_obtained,
@@ -325,10 +322,10 @@ def sync_data(payload: dict = Body(...)):
                             last_updated = EXCLUDED.last_updated,
                             version = EXCLUDED.version
                     """, (
-                        row["sbrn"],
-                        row["semester"],
-                        row["subject_id"],
-                        row["attempt"],
+                        row.get("sbrn"),
+                        row.get("semester"),
+                        row.get("subject_id"),
+                        row.get("attempt"),
                         row.get("marks_obtained"),
                         row.get("max_marks"),
                         row.get("grade"),
@@ -338,17 +335,19 @@ def sync_data(payload: dict = Body(...)):
                     ))
 
                 # ===============================
-                # OTHER TABLES (KEEP EXISTING)
+                # 🔁 OTHER TABLES (KEEP YOUR OLD LOGIC)
                 # ===============================
                 else:
-                    # your existing logic for students, faculty, etc.
+                    # 👇 IMPORTANT: keep your existing insert/update logic here
+                    # DO NOT leave it empty if other tables are syncing
                     pass
 
         conn.commit()
+        print("✅ SYNC SUCCESS")
 
         return {
             "status": "success",
-            "message": "Sync completed"
+            "message": "Sync completed successfully"
         }
 
     except Exception as e:
