@@ -1399,6 +1399,43 @@ def get_students(department: str, semester: str, section: str):
         for r in rows
     ]
 
+
+from fastapi import HTTPException
+
+# ======================================================
+# 🔥 DELETE STUDENT (CLOUD SIDE)
+# ======================================================
+
+@app.delete("/delete/students/{sbrn}")
+def delete_student(sbrn: str):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            DELETE FROM students
+            WHERE sbrn = %s
+        """, (sbrn,))
+
+        conn.commit()
+
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        return {
+            "status": "deleted",
+            "sbrn": sbrn
+        }
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        release_db(conn)
+
+
 # ======================================================
 # CHECK ATTENDANCE EXISTS (FIXED)
 # ======================================================
