@@ -2031,9 +2031,6 @@ def sync_students_from_cloud(
 # ======================================================
 # UNIVERSAL SYNC UPLOAD (AUTO PRIMARY KEY DETECTION)
 # ======================================================
-
-@app.post("/sync-generic/{table_name}")
-
 @app.post("/sync-generic/{table_name}")
 def universal_sync_upload(table_name: str, records: list = Body(...)):
 
@@ -2045,13 +2042,34 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
     if not records:
         return {"status": "no_data"}
 
+    # ======================================================
+    # DEBUG (VERY IMPORTANT)
+    # ======================================================
+    print("\n" + "=" * 80)
+    print(f"🌐 SYNC REQUEST RECEIVED")
+    print(f"📦 Table   : {table_name}")
+    print(f"📄 Records : {len(records)}")
+
+    if table_name == "students":
+        print("\n📚 Student Payload:")
+        for r in records:
+            print(
+                f"   SBRN={r.get('sbrn')} | "
+                f"Semester={r.get('semester')} | "
+                f"Version={r.get('version')} | "
+                f"Sync={r.get('sync_pending')} | "
+                f"Status={r.get('academic_status')}"
+            )
+
+    print("=" * 80)
+
     conn = connect_db()
     cur = conn.cursor()
 
     try:
 
         # ======================================================
-        # 🔴 FINAL STATUS PROTECTION (STRUCK_OFF FIX)
+        # STUDENT STATUS PROTECTION
         # ======================================================
         if table_name == "students":
 
@@ -2074,15 +2092,25 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
                 incoming_status = (row.get("academic_status") or "").upper()
 
                 if existing_status == "STRUCK_OFF":
-                    row["academic_status"] = "ACTIVE" if incoming_status == "ACTIVE" else "STRUCK_OFF"
+
+                    row["academic_status"] = (
+                        "ACTIVE"
+                        if incoming_status == "ACTIVE"
+                        else "STRUCK_OFF"
+                    )
 
                 elif incoming_status == "STRUCK_OFF":
+
                     row["academic_status"] = "STRUCK_OFF"
 
                 elif not incoming_status:
-                    row["academic_status"] = existing_status if existing else "REGULAR"
+
+                    row["academic_status"] = (
+                        existing_status if existing else "REGULAR"
+                    )
 
                 else:
+
                     row["academic_status"] = incoming_status
 
         # --------------------------------------------------
@@ -2097,7 +2125,10 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         valid_columns = {r[0] for r in cur.fetchall()}
 
         if not valid_columns:
-            raise HTTPException(status_code=400, detail="Table not found")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Table '{table_name}' not found."
+            )
 
         # --------------------------------------------------
         # Detect PRIMARY KEY
@@ -2106,10 +2137,10 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
             SELECT a.attname
             FROM pg_index i
             JOIN pg_attribute a
-            ON a.attrelid = i.indrelid
-            AND a.attnum = ANY(i.indkey)
-            WHERE i.indrelid = %s::regclass
-            AND i.indisprimary
+                 ON a.attrelid=i.indrelid
+                AND a.attnum=ANY(i.indkey)
+            WHERE i.indrelid=%s::regclass
+              AND i.indisprimary
         """, (table_name,))
 
         pk_columns = [r[0] for r in cur.fetchall()]
@@ -2117,20 +2148,20 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         if not pk_columns:
             raise HTTPException(
                 status_code=400,
-                detail=f"No primary key defined for table {table_name}"
+                detail=f"No primary key for {table_name}"
             )
 
         conflict_key = "(" + ",".join(pk_columns) + ")"
 
         # --------------------------------------------------
-        # Collect all valid columns
+        # Collect valid columns
         # --------------------------------------------------
         all_columns = set()
 
-        for r in records:
-            for c in r.keys():
-                if c in valid_columns:
-                    all_columns.add(c)
+        for rec in records:
+            for col in rec.keys():
+                if col in valid_columns:
+                    all_columns.add(col)
 
         if table_name == "students":
             all_columns.add("academic_status")
@@ -2138,58 +2169,115 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         columns = list(all_columns)
 
         if not columns:
-            raise HTTPException(status_code=400, detail="No valid columns")
+            raise HTTPException(
+                status_code=400,
+                detail="No valid columns supplied."
+            )
 
         cols = ",".join(columns)
-        vals = ",".join([f"%({c})s" for c in columns])
 
-        update_cols = ",".join(
-            [f"{c}=EXCLUDED.{c}" for c in columns if c not in pk_columns]
+        vals = ",".join(
+            [f"%({c})s" for c in columns]
         )
 
-        # 🔥 FINAL FIX (NO SEMICOLON)
+        update_cols = ",".join(
+            [
+                f"{c}=EXCLUDED.{c}"
+                for c in columns
+                if c not in pk_columns
+            ]
+        )
+
         query = f"""
-        INSERT INTO "{table_name}" ({cols})
-        VALUES ({vals})
-        ON CONFLICT {conflict_key}
-        DO UPDATE SET
-        {update_cols}
+            INSERT INTO "{table_name}"
+            ({cols})
+            VALUES ({vals})
+            ON CONFLICT {conflict_key}
+            DO UPDATE SET
+            {update_cols}
         """
 
         # --------------------------------------------------
-        # Ensure all rows have all columns
+        # Ensure all keys exist
         # --------------------------------------------------
-        for r in records:
-            for c in columns:
-                if c not in r:
-                    r[c] = None
+        for rec in records:
+
+            for col in columns:
+
+                if col not in rec:
+                    rec[col] = None
+
+        # --------------------------------------------------
+        # DEBUG SQL
+        # --------------------------------------------------
+        print("\n🚀 Executing UPSERT...")
+        print("Table :", table_name)
+        print("Columns :", columns)
 
         execute_batch(cur, query, records)
 
         conn.commit()
 
+        print(f"✅ PostgreSQL updated successfully ({len(records)} rows)")
+
+        # --------------------------------------------------
+        # Verify student update
+        # --------------------------------------------------
+        if table_name == "students":
+
+            print("\n🔍 Verifying PostgreSQL Data")
+
+            for row in records:
+
+                sbrn = row.get("sbrn")
+
+                cur.execute("""
+                    SELECT
+                        sbrn,
+                        semester,
+                        version,
+                        academic_status
+                    FROM students
+                    WHERE sbrn=%s
+                """, (sbrn,))
+
+                verify = cur.fetchone()
+
+                print("DB ROW:", verify)
+
+        # --------------------------------------------------
+        # Broadcast
+        # --------------------------------------------------
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(broadcast_event(table_name))
+            loop.create_task(
+                broadcast_event(table_name)
+            )
         except RuntimeError:
             pass
 
     except Exception as e:
 
         conn.rollback()
+
+        print("\n❌ SYNC ERROR")
+        print(e)
+
         release_db(conn)
 
-        print("❌ SYNC ERROR:", e)
-
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
     release_db(conn)
+
+    print("✅ Sync Completed\n")
 
     return {
         "status": "success",
         "rows": len(records)
     }
-
 
 # ======================================================
 # UNIVERSAL SYNC DOWNLOAD (SAFE + FAST)
