@@ -435,11 +435,9 @@ SYNC_TABLES = {
     "rooms",
     "departments",
     "faculty_subject_map",
-    "activity_attendance",
+    "activity_attendance"
 
-    # 🔥 CRITICAL (RESULT SYNC FIX)
-    "result_subjects",
-    "results_semester"
+    
 }
 
 
@@ -2372,152 +2370,752 @@ def universal_sync_download(table_name: str, since: Optional[str] = None):
     }
 
 
+# ======================================================
+# 🔥 RESULT SUBJECTS SYNC
+# LOCAL SQLITE → CLOUD POSTGRESQL
+#
+# IMPORTANT:
+# ❌ NEVER SEND LOCAL SQLITE "id"
+# ✅ CLOUD GENERATES ITS OWN SERIAL ID
+# ✅ UPSERT USING:
+#    (sbrn, semester, subject_id, attempt)
+# ======================================================
+
 @app.post("/sync/result_subjects")
 def sync_result_subjects(records: list = Body(...)):
 
     if not records:
-        return {"status": "no_data"}
+        return {
+            "status": "no_data",
+            "rows": 0
+        }
 
-    def safe_float(val):
-        try:
-            return float(val)
-        except:
+    def safe_float(value):
+        """
+        Convert marks/max_marks safely.
+
+        Grades such as A/B/S are not converted here because
+        grade is stored separately.
+        """
+        if value is None:
             return None
 
-    conn = connect_db()
-    cur = conn.cursor()
+        try:
+            text = str(value).strip()
+
+            if text == "":
+                return None
+
+            return float(text)
+
+        except (ValueError, TypeError):
+            return None
+
+    conn = None
+    cur = None
 
     clean_records = []
 
-    for r in records:
-        try:
-            clean = {
-                "id": r.get("id"),
-                "sbrn": r.get("sbrn"),
-                "semester": r.get("semester"),
-                "subject_id": r.get("subject_id"),
-                "attempt": r.get("attempt"),
+    try:
 
-                "marks_obtained": safe_float(r.get("marks_obtained")),
-                "max_marks": safe_float(r.get("max_marks")),
+        conn = connect_db()
+        cur = conn.cursor()
 
-                "grade": r.get("grade"),
-                "status": r.get("status"),
-                "last_updated": r.get("last_updated")
+        print("\n" + "=" * 80)
+        print("☁ RESULT SUBJECTS SYNC STARTED")
+        print("📦 Incoming rows:", len(records))
+        print("=" * 80)
+
+        # ==================================================
+        # CLEAN / VALIDATE RECORDS
+        # ==================================================
+
+        for index, r in enumerate(records, start=1):
+
+            try:
+
+                if not isinstance(r, dict):
+                    print(
+                        f"⚠ Skipping result_subjects row "
+                        f"{index}: not a dictionary"
+                    )
+                    continue
+
+                sbrn = r.get("sbrn")
+                semester = r.get("semester")
+                subject_id = r.get("subject_id")
+                attempt = r.get("attempt")
+
+                # ------------------------------------------
+                # REQUIRED UNIQUE KEY
+                # ------------------------------------------
+
+                if not sbrn:
+                    print(f"⚠ Skipping row {index}: missing sbrn")
+                    continue
+
+                if semester is None or str(semester).strip() == "":
+                    print(f"⚠ Skipping row {index}: missing semester")
+                    continue
+
+                if not subject_id:
+                    print(
+                        f"⚠ Skipping row {index}: "
+                        f"missing subject_id"
+                    )
+                    continue
+
+                if attempt is None:
+                    print(f"⚠ Skipping row {index}: missing attempt")
+                    continue
+
+                try:
+                    attempt_value = int(attempt)
+                except (ValueError, TypeError):
+                    print(
+                        f"⚠ Skipping row {index}: "
+                        f"invalid attempt={attempt}"
+                    )
+                    continue
+
+                # ------------------------------------------
+                # NORMALIZED RECORD
+                #
+                # 🚨 NOTICE:
+                # THERE IS NO "id" HERE.
+                # ------------------------------------------
+
+                clean = {
+                    "sbrn": str(sbrn).strip(),
+                    "semester": str(semester).strip(),
+                    "subject_id": str(subject_id).strip(),
+                    "attempt": attempt_value,
+
+                    "marks_obtained": safe_float(
+                        r.get("marks_obtained")
+                    ),
+
+                    "max_marks": safe_float(
+                        r.get("max_marks")
+                    ),
+
+                    "grade": (
+                        str(r.get("grade")).strip()
+                        if r.get("grade") is not None
+                        else None
+                    ),
+
+                    "status": (
+                        str(r.get("status")).strip()
+                        if r.get("status") is not None
+                        else None
+                    ),
+
+                    "last_updated": (
+                        r.get("last_updated")
+                        or datetime.utcnow()
+                    ),
+
+                    "version": int(r.get("version") or 1)
+                }
+
+                clean_records.append(clean)
+
+                print(
+                    f"✅ SUBJECT ROW {index}: "
+                    f"{clean['sbrn']} | "
+                    f"Sem {clean['semester']} | "
+                    f"{clean['subject_id']} | "
+                    f"Attempt {clean['attempt']} | "
+                    f"Grade {clean['grade']} | "
+                    f"Version {clean['version']}"
+                )
+
+            except Exception as e:
+
+                print(
+                    f"❌ Failed to prepare "
+                    f"result_subjects row {index}: {e}"
+                )
+
+        # ==================================================
+        # NOTHING VALID
+        # ==================================================
+
+        if not clean_records:
+
+            print("⚠ No valid result_subjects records")
+
+            return {
+                "status": "no_valid_records",
+                "rows": 0
             }
 
-            print("🚀 CLEAN SUBJECT RECORD:", clean)
-            clean_records.append(clean)
+        # ==================================================
+        # ENSURE REQUIRED UNIQUE CONSTRAINT EXISTS
+        #
+        # This is the REAL logical key of a result.
+        # ==================================================
 
-        except Exception as e:
-            print("❌ Skip bad record:", r, e)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            uq_result_subjects_sync_key
+            ON result_subjects
+            (
+                sbrn,
+                semester,
+                subject_id,
+                attempt
+            )
+        """)
 
-    try:
-        execute_batch(cur, """
-            INSERT INTO result_subjects (
-                id, sbrn, semester, subject_id, attempt,
-                marks_obtained, max_marks, grade, status, last_updated
+        # ==================================================
+        # UPSERT
+        #
+        # 🚨 VERY IMPORTANT:
+        #
+        # DO NOT INSERT "id".
+        #
+        # PostgreSQL generates its own ID.
+        # ==================================================
+
+        query = """
+            INSERT INTO result_subjects
+            (
+                sbrn,
+                semester,
+                subject_id,
+                attempt,
+                marks_obtained,
+                max_marks,
+                grade,
+                status,
+                last_updated,
+                version
             )
-            VALUES (
-                %(id)s, %(sbrn)s, %(semester)s, %(subject_id)s, %(attempt)s,
-                %(marks_obtained)s, %(max_marks)s, %(grade)s, %(status)s, %(last_updated)s
+            VALUES
+            (
+                %(sbrn)s,
+                %(semester)s,
+                %(subject_id)s,
+                %(attempt)s,
+                %(marks_obtained)s,
+                %(max_marks)s,
+                %(grade)s,
+                %(status)s,
+                %(last_updated)s,
+                %(version)s
             )
-            ON CONFLICT (sbrn, semester, subject_id, attempt)
+
+            ON CONFLICT
+            (
+                sbrn,
+                semester,
+                subject_id,
+                attempt
+            )
+
             DO UPDATE SET
+
                 marks_obtained = EXCLUDED.marks_obtained,
+
                 max_marks = EXCLUDED.max_marks,
+
                 grade = EXCLUDED.grade,
+
                 status = EXCLUDED.status,
-                last_updated = EXCLUDED.last_updated
-        """, clean_records)
+
+                last_updated = EXCLUDED.last_updated,
+
+                version = EXCLUDED.version
+        """
+
+        # ==================================================
+        # EXECUTE
+        # ==================================================
+
+        execute_batch(
+            cur,
+            query,
+            clean_records
+        )
+
+        # ==================================================
+        # COMMIT ONLY AFTER SUCCESS
+        # ==================================================
 
         conn.commit()
 
+        print("\n" + "=" * 80)
+        print(
+            f"☁ RESULT SUBJECTS SYNC SUCCESS "
+            f"→ {len(clean_records)} rows"
+        )
+        print("=" * 80)
+
+        # ==================================================
+        # OPTIONAL VERIFICATION
+        # ==================================================
+
+        for row in clean_records:
+
+            cur.execute("""
+                SELECT
+                    id,
+                    sbrn,
+                    semester,
+                    subject_id,
+                    attempt,
+                    grade,
+                    status,
+                    version,
+                    last_updated
+                FROM result_subjects
+                WHERE sbrn=%s
+                  AND semester=%s
+                  AND subject_id=%s
+                  AND attempt=%s
+            """, (
+                row["sbrn"],
+                row["semester"],
+                row["subject_id"],
+                row["attempt"]
+            ))
+
+            db_row = cur.fetchone()
+
+            if db_row:
+                print(
+                    "✅ CLOUD RESULT SUBJECT:",
+                    db_row
+                )
+
+        return {
+            "status": "success",
+            "rows": len(clean_records)
+        }
+
     except Exception as e:
-        conn.rollback()
-        print("❌ result_subjects sync error:", e)
-        raise HTTPException(status_code=500, detail=str(e))
+
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        print("\n" + "=" * 80)
+        print("❌ RESULT SUBJECTS SYNC FAILED")
+        print("❌ ERROR:", str(e))
+        print("=" * 80)
+
+        # IMPORTANT:
+        # Returning HTTP 500 causes the desktop sync code
+        # to correctly treat this as a FAILED synchronization.
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
     finally:
-        release_db(conn)
 
-    return {"status": "success", "rows": len(clean_records)}
+        if conn:
+            try:
+                release_db(conn)
+            except Exception:
+                pass
 
 
+# ======================================================
+# 🔥 RESULTS SEMESTER SYNC
+# LOCAL SQLITE → CLOUD POSTGRESQL
+#
+# IMPORTANT:
+# ❌ NEVER SEND LOCAL SQLITE "id"
+# ✅ CLOUD GENERATES ITS OWN SERIAL ID
+# ✅ UPSERT USING:
+#    (sbrn, semester, attempt)
+# ======================================================
 
 @app.post("/sync/results_semester")
 def sync_results_semester(records: list = Body(...)):
 
     if not records:
-        return {"status": "no_data"}
+        return {
+            "status": "no_data",
+            "rows": 0
+        }
 
-    def safe_float(val):
-        try:
-            return float(val)
-        except:
+    def safe_float(value):
+        """
+        Convert numeric values safely.
+        """
+
+        if value is None:
             return None
 
-    conn = connect_db()
-    cur = conn.cursor()
+        try:
+
+            text = str(value).strip()
+
+            if text == "":
+                return None
+
+            return float(text)
+
+        except (ValueError, TypeError):
+
+            return None
+
+    conn = None
+    cur = None
 
     clean_records = []
 
-    for r in records:
-        try:
-            clean = {
-                "id": r.get("id"),
-                "sbrn": r.get("sbrn"),
-                "semester": r.get("semester"),
-                "attempt": r.get("attempt"),
+    try:
 
-                "total_marks": safe_float(r.get("total_marks")),
-                "percentage": safe_float(r.get("percentage")),
-                "result_status": r.get("result_status"),
+        conn = connect_db()
+        cur = conn.cursor()
 
-                "sgpa": safe_float(r.get("sgpa")),
-                "created_at": r.get("created_at"),
-                "last_updated": r.get("last_updated")
+        print("\n" + "=" * 80)
+        print("☁ RESULTS SEMESTER SYNC STARTED")
+        print("📦 Incoming rows:", len(records))
+        print("=" * 80)
+
+        # ==================================================
+        # CLEAN / VALIDATE RECORDS
+        # ==================================================
+
+        for index, r in enumerate(records, start=1):
+
+            try:
+
+                if not isinstance(r, dict):
+
+                    print(
+                        f"⚠ Skipping semester row "
+                        f"{index}: not a dictionary"
+                    )
+
+                    continue
+
+                sbrn = r.get("sbrn")
+                semester = r.get("semester")
+                attempt = r.get("attempt")
+
+                # ------------------------------------------
+                # REQUIRED UNIQUE KEY
+                # ------------------------------------------
+
+                if not sbrn:
+
+                    print(
+                        f"⚠ Skipping semester row "
+                        f"{index}: missing sbrn"
+                    )
+
+                    continue
+
+                if semester is None or str(semester).strip() == "":
+
+                    print(
+                        f"⚠ Skipping semester row "
+                        f"{index}: missing semester"
+                    )
+
+                    continue
+
+                if attempt is None:
+
+                    print(
+                        f"⚠ Skipping semester row "
+                        f"{index}: missing attempt"
+                    )
+
+                    continue
+
+                try:
+
+                    attempt_value = int(attempt)
+
+                except (ValueError, TypeError):
+
+                    print(
+                        f"⚠ Skipping semester row "
+                        f"{index}: invalid attempt={attempt}"
+                    )
+
+                    continue
+
+                # ------------------------------------------
+                # VERSION
+                # ------------------------------------------
+
+                try:
+
+                    version_value = int(
+                        r.get("version") or 1
+                    )
+
+                except (ValueError, TypeError):
+
+                    version_value = 1
+
+                # ------------------------------------------
+                # NORMALIZED RECORD
+                #
+                # 🚨 NO "id"
+                # ------------------------------------------
+
+                clean = {
+
+                    "sbrn": str(sbrn).strip(),
+
+                    "semester": str(
+                        semester
+                    ).strip(),
+
+                    "attempt": attempt_value,
+
+                    "total_marks": safe_float(
+                        r.get("total_marks")
+                    ),
+
+                    "percentage": safe_float(
+                        r.get("percentage")
+                    ),
+
+                    "result_status": (
+                        str(
+                            r.get("result_status")
+                        ).strip()
+                        if r.get("result_status") is not None
+                        else None
+                    ),
+
+                    "sgpa": safe_float(
+                        r.get("sgpa")
+                    ),
+
+                    "created_at": (
+                        r.get("created_at")
+                        or datetime.utcnow()
+                    ),
+
+                    "last_updated": (
+                        r.get("last_updated")
+                        or datetime.utcnow()
+                    ),
+
+                    "version": version_value
+                }
+
+                clean_records.append(clean)
+
+                print(
+                    f"✅ SEMESTER ROW {index}: "
+                    f"{clean['sbrn']} | "
+                    f"Sem {clean['semester']} | "
+                    f"Attempt {clean['attempt']} | "
+                    f"SGPA {clean['sgpa']} | "
+                    f"% {clean['percentage']} | "
+                    f"Status {clean['result_status']} | "
+                    f"Version {clean['version']}"
+                )
+
+            except Exception as e:
+
+                print(
+                    f"❌ Failed to prepare "
+                    f"results_semester row {index}: {e}"
+                )
+
+        # ==================================================
+        # NOTHING VALID
+        # ==================================================
+
+        if not clean_records:
+
+            print("⚠ No valid results_semester records")
+
+            return {
+                "status": "no_valid_records",
+                "rows": 0
             }
 
-            print("🚀 CLEAN SEMESTER RECORD:", clean)
-            clean_records.append(clean)
+        # ==================================================
+        # ENSURE UNIQUE RESULT KEY
+        # ==================================================
 
-        except Exception as e:
-            print("❌ Skip bad semester record:", r, e)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            uq_results_semester_sync_key
+            ON results_semester
+            (
+                sbrn,
+                semester,
+                attempt
+            )
+        """)
 
-    try:
-        execute_batch(cur, """
-            INSERT INTO results_semester (
-                id, sbrn, semester, attempt,
-                total_marks, percentage, result_status,
-                sgpa, created_at, last_updated
+        # ==================================================
+        # UPSERT
+        #
+        # 🚨 NO LOCAL SQLITE ID
+        # ==================================================
+
+        query = """
+            INSERT INTO results_semester
+            (
+                sbrn,
+                semester,
+                attempt,
+                total_marks,
+                percentage,
+                result_status,
+                sgpa,
+                created_at,
+                last_updated,
+                version
             )
-            VALUES (
-                %(id)s, %(sbrn)s, %(semester)s, %(attempt)s,
-                %(total_marks)s, %(percentage)s, %(result_status)s,
-                %(sgpa)s, %(created_at)s, %(last_updated)s
+            VALUES
+            (
+                %(sbrn)s,
+                %(semester)s,
+                %(attempt)s,
+                %(total_marks)s,
+                %(percentage)s,
+                %(result_status)s,
+                %(sgpa)s,
+                %(created_at)s,
+                %(last_updated)s,
+                %(version)s
             )
-            ON CONFLICT (sbrn, semester, attempt)
+
+            ON CONFLICT
+            (
+                sbrn,
+                semester,
+                attempt
+            )
+
             DO UPDATE SET
-                total_marks = EXCLUDED.total_marks,
-                percentage = EXCLUDED.percentage,
-                result_status = EXCLUDED.result_status,
-                sgpa = EXCLUDED.sgpa,
-                last_updated = EXCLUDED.last_updated
-        """, clean_records)
+
+                total_marks =
+                    EXCLUDED.total_marks,
+
+                percentage =
+                    EXCLUDED.percentage,
+
+                result_status =
+                    EXCLUDED.result_status,
+
+                sgpa =
+                    EXCLUDED.sgpa,
+
+                last_updated =
+                    EXCLUDED.last_updated,
+
+                version =
+                    EXCLUDED.version
+
+                -- IMPORTANT:
+                -- created_at is NOT changed on update.
+        """
+
+        # ==================================================
+        # EXECUTE
+        # ==================================================
+
+        execute_batch(
+            cur,
+            query,
+            clean_records
+        )
+
+        # ==================================================
+        # COMMIT
+        # ==================================================
 
         conn.commit()
 
+        print("\n" + "=" * 80)
+        print(
+            f"☁ RESULTS SEMESTER SYNC SUCCESS "
+            f"→ {len(clean_records)} rows"
+        )
+        print("=" * 80)
+
+        # ==================================================
+        # VERIFY
+        # ==================================================
+
+        for row in clean_records:
+
+            cur.execute("""
+                SELECT
+                    id,
+                    sbrn,
+                    semester,
+                    attempt,
+                    total_marks,
+                    percentage,
+                    sgpa,
+                    result_status,
+                    version,
+                    last_updated
+                FROM results_semester
+                WHERE sbrn=%s
+                  AND semester=%s
+                  AND attempt=%s
+            """, (
+                row["sbrn"],
+                row["semester"],
+                row["attempt"]
+            ))
+
+            db_row = cur.fetchone()
+
+            if db_row:
+
+                print(
+                    "✅ CLOUD SEMESTER RESULT:",
+                    db_row
+                )
+
+        return {
+            "status": "success",
+            "rows": len(clean_records)
+        }
+
     except Exception as e:
-        conn.rollback()
-        print("❌ results_semester sync error:", e)
-        raise HTTPException(status_code=500, detail=str(e))
+
+        if conn:
+
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        print("\n" + "=" * 80)
+        print("❌ RESULTS SEMESTER SYNC FAILED")
+        print("❌ ERROR:", str(e))
+        print("=" * 80)
+
+        # VERY IMPORTANT:
+        # HTTP 500 must reach the desktop.
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
     finally:
-        release_db(conn)
 
-    return {"status": "success", "rows": len(clean_records)}
+        if conn:
 
+            try:
+                release_db(conn)
+            except Exception:
+                pass
 # ======================================================
 # 🔥 SYNC ATTENDANCE (DESKTOP → CLOUD)
 # ======================================================
