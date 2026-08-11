@@ -884,17 +884,33 @@ def get_departments():
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT DISTINCT department
-        FROM students
-        WHERE department IS NOT NULL
-        ORDER BY department
-    """)
+    try:
+        cur.execute("""
+            SELECT department
+            FROM departments
+            WHERE department IS NOT NULL
+              AND TRIM(department) <> ''
+            ORDER BY department
+        """)
 
-    rows = cur.fetchall()
-    release_db(conn)
+        rows = cur.fetchall()
 
-    return [r[0] for r in rows]
+        return [
+            str(row[0]).strip()
+            for row in rows
+            if row[0]
+        ]
+
+    except Exception as e:
+        print("❌ Failed to load departments:", e)
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load departments: {str(e)}"
+        )
+
+    finally:
+        release_db(conn)
 
 # ======================================================
 # GET SEMESTERS
