@@ -1270,98 +1270,235 @@ def get_timetable(department: str, semester: str, day: str):
 # ======================================================
 
 @app.get("/subjects-by-date")
-def get_subjects_by_date(department: str, semester: str, date: str):
+def get_subjects_by_date(
+    department: str,
+    semester: str,
+    date: str
+):
+    """
+    Return timetable subjects with the REAL full subject name.
+
+    timetable_slots:
+        subject_id = source for scheduled subject
+
+    subjects:
+        subject_name/type = source for subject details
+
+    subject_semester_map:
+        semester + department = source for subject mapping
+
+    Placeholder subject rows where:
+        subject_name == subject_id
+    are ignored.
+    """
 
     try:
-        # Convert to proper date object
-        parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
+        parsed_date = datetime.strptime(
+            date,
+            "%Y-%m-%d"
+        ).date()
 
-        # 🔥 BLOCK SUNDAY / 2ND SATURDAY / HOLIDAY / OUTSIDE SEMESTER
-        if not is_working_day(parsed_date, department, semester):
-            print("DEBUG: Holiday or Non-working day → No subjects")
+        if not is_working_day(
+            parsed_date,
+            department,
+            semester
+        ):
+            print(
+                "DEBUG: Holiday or Non-working day → No subjects"
+            )
             return []
 
         weekday_short = parsed_date.strftime("%a").strip()
 
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid date format"
+        )
 
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT
-            t.subject_id,
-            COALESCE(sf.subject_name, s.subject_name, t.subject_id) AS subject_name,
-            COALESCE(sf.type, s.type, t.type) AS type,
+    try:
 
-            -- 🔥 KEY FIX: get sections from timetable
-            STRING_AGG(DISTINCT t.section, ',') AS sections,
-
-            MIN(t.period_no) AS first_period
-
-        FROM timetable_slots t
-
-        LEFT JOIN subjects s
-          ON LOWER(TRIM(t.subject_id)) = LOWER(TRIM(s.subject_id))
-         AND LOWER(TRIM(t.semester))   = LOWER(TRIM(s.semester))
-         AND LOWER(TRIM(t.department)) = LOWER(TRIM(s.department))
-
-        -- 🔥 FALLBACK SUBJECT LOOKUP
-        -- 1st/2nd semester subjects such as AS/BM may be stored
-        -- under "Applied Sciences & Humanities" while the timetable
-        -- department is "Architecture Assistantship".
-        LEFT JOIN LATERAL (
+        cur.execute("""
             SELECT
-                sx.subject_name,
-                sx.type
-            FROM subjects sx
-            WHERE LOWER(TRIM(sx.subject_id)) = LOWER(TRIM(t.subject_id))
-              AND LOWER(TRIM(sx.semester)) = LOWER(TRIM(t.semester))
-              AND COALESCE(TRIM(sx.subject_name), '') <> ''
-              AND LOWER(TRIM(sx.subject_name))
-                    <> LOWER(TRIM(sx.subject_id))
+                t.subject_id,
+
+                COALESCE(
+                    NULLIF(TRIM(s.subject_name), ''),
+                    t.subject_id
+                ) AS subject_name,
+
+                COALESCE(
+                    NULLIF(TRIM(s.type), ''),
+                    t.type
+                ) AS type,
+
+                STRING_AGG(
+                    DISTINCT t.section,
+                    ','
+                ) AS sections,
+
+                MIN(t.period_no) AS first_period
+
+            FROM timetable_slots t
+
+            LEFT JOIN LATERAL (
+
+                SELECT
+                    sx.subject_name,
+                    sx.type
+
+                FROM subjects sx
+
+                INNER JOIN subject_semester_map sm
+                    ON LOWER(TRIM(sm.subject_id))
+                       =
+                       LOWER(TRIM(sx.subject_id))
+
+                WHERE
+                    LOWER(TRIM(sx.subject_id))
+                        =
+                    LOWER(TRIM(t.subject_id))
+
+                    AND
+
+                    LOWER(TRIM(sm.semester))
+                        =
+                    LOWER(TRIM(t.semester))
+
+                    AND
+
+                    (
+                        LOWER(TRIM(COALESCE(sm.department, '')))
+                            =
+                        LOWER(TRIM(t.department))
+
+                        OR
+
+                        COALESCE(TRIM(sm.department), '') = ''
+                    )
+
+                    -- Ignore placeholder:
+                    -- AS -> AS
+                    AND COALESCE(
+                        TRIM(sx.subject_name),
+                        ''
+                    ) <> ''
+
+                    AND LOWER(
+                        TRIM(sx.subject_name)
+                    )
+                    <>
+                    LOWER(
+                        TRIM(sx.subject_id)
+                    )
+
+                ORDER BY
+
+                    -- Exact department mapping first
+                    CASE
+                        WHEN LOWER(
+                            TRIM(COALESCE(sm.department, ''))
+                        )
+                        =
+                        LOWER(
+                            TRIM(t.department)
+                        )
+                        THEN 0
+
+                        -- COMMON / blank department second
+                        ELSE 1
+                    END
+
+                LIMIT 1
+
+            ) s ON TRUE
+
+            WHERE
+                LOWER(TRIM(t.department))
+                    =
+                LOWER(TRIM(%s))
+
+                AND
+
+                LOWER(TRIM(t.semester))
+                    =
+                LOWER(TRIM(%s))
+
+                AND
+
+                LOWER(TRIM(t.day))
+                    =
+                LOWER(TRIM(%s))
+
+            GROUP BY
+                t.subject_id,
+                s.subject_name,
+                s.type,
+                t.type
+
             ORDER BY
-                CASE
-                    WHEN LOWER(TRIM(sx.department))
-                         = LOWER(TRIM(t.department))
-                    THEN 0
-                    ELSE 1
-                END
-            LIMIT 1
-        ) sf ON TRUE
+                first_period
 
-        WHERE LOWER(TRIM(t.department)) = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.semester))   = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.day))        = LOWER(TRIM(%s))
+        """, (
+            department,
+            semester,
+            weekday_short
+        ))
 
-        GROUP BY
-            t.subject_id,
-            s.subject_name,
-            s.type,
-            sf.subject_name,
-            sf.type,
-            t.type
-        ORDER BY first_period
-    """, (department, semester, weekday_short))
+        rows = cur.fetchall()
 
-    rows = cur.fetchall()
-    release_db(conn)
+        print(
+            "DEBUG subjects found:",
+            len(rows)
+        )
 
-    print("DEBUG subjects found:", len(rows))
+        result = []
 
-    return [
-        {
-            "subject_id": r[0],
-            "subject_name": r[1],
-            "type": r[2],
+        for r in rows:
 
-            # 🔥 IMPORTANT: convert "A,B" → ["A","B"]
-            "sections": r[3].split(",") if r[3] else []
-        }
-        for r in rows
-    ]
+            subject_id = str(
+                r[0] or ""
+            ).strip()
 
+            subject_name = str(
+                r[1] or ""
+            ).strip()
+
+            subject_type = str(
+                r[2] or ""
+            ).strip()
+
+            sections = (
+                r[3].split(",")
+                if r[3]
+                else []
+            )
+
+            print(
+                "📚 SUBJECT API → "
+                f"ID={subject_id} | "
+                f"NAME={subject_name} | "
+                f"TYPE={subject_type}"
+            )
+
+            result.append({
+                "subject_id": subject_id,
+                "subject_name": subject_name,
+                "type": subject_type,
+                "sections": [
+                    s.strip()
+                    for s in sections
+                    if s.strip()
+                ]
+            })
+
+        return result
+
+    finally:
+        release_db(conn)
 
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
