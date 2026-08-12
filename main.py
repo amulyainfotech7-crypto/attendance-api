@@ -1292,8 +1292,8 @@ def get_subjects_by_date(department: str, semester: str, date: str):
     cur.execute("""
         SELECT
             t.subject_id,
-            COALESCE(s.subject_name, t.subject_id) AS subject_name,
-            COALESCE(s.type, t.type) AS type,
+            COALESCE(sf.subject_name, s.subject_name, t.subject_id) AS subject_name,
+            COALESCE(sf.type, s.type, t.type) AS type,
 
             -- 🔥 KEY FIX: get sections from timetable
             STRING_AGG(DISTINCT t.section, ',') AS sections,
@@ -1307,11 +1307,41 @@ def get_subjects_by_date(department: str, semester: str, date: str):
          AND LOWER(TRIM(t.semester))   = LOWER(TRIM(s.semester))
          AND LOWER(TRIM(t.department)) = LOWER(TRIM(s.department))
 
+        -- 🔥 FALLBACK SUBJECT LOOKUP
+        -- 1st/2nd semester subjects such as AS/BM may be stored
+        -- under "Applied Sciences & Humanities" while the timetable
+        -- department is "Architecture Assistantship".
+        LEFT JOIN LATERAL (
+            SELECT
+                sx.subject_name,
+                sx.type
+            FROM subjects sx
+            WHERE LOWER(TRIM(sx.subject_id)) = LOWER(TRIM(t.subject_id))
+              AND LOWER(TRIM(sx.semester)) = LOWER(TRIM(t.semester))
+              AND COALESCE(TRIM(sx.subject_name), '') <> ''
+              AND LOWER(TRIM(sx.subject_name))
+                    <> LOWER(TRIM(sx.subject_id))
+            ORDER BY
+                CASE
+                    WHEN LOWER(TRIM(sx.department))
+                         = LOWER(TRIM(t.department))
+                    THEN 0
+                    ELSE 1
+                END
+            LIMIT 1
+        ) sf ON TRUE
+
         WHERE LOWER(TRIM(t.department)) = LOWER(TRIM(%s))
           AND LOWER(TRIM(t.semester))   = LOWER(TRIM(%s))
           AND LOWER(TRIM(t.day))        = LOWER(TRIM(%s))
 
-        GROUP BY t.subject_id, s.subject_name, s.type, t.type
+        GROUP BY
+            t.subject_id,
+            s.subject_name,
+            s.type,
+            sf.subject_name,
+            sf.type,
+            t.type
         ORDER BY first_period
     """, (department, semester, weekday_short))
 
