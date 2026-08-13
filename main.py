@@ -1794,8 +1794,10 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
         for r in rows
     ]
 
+
+
 # ======================================================
-# 🔥 SYNC STUDENTS (LOCAL → CLOUD) — FINAL ENTERPRISE SAFE
+# 🔥 SYNC STUDENTS (LOCAL → CLOUD) — FINAL FIXED
 # ======================================================
 
 @app.post("/sync/students")
@@ -1804,267 +1806,616 @@ def sync_students(records: list = Body(...)):
     if not records:
         return {"status": "no_data"}
 
+    from datetime import datetime, timezone
+
+    # ======================================================
+    # SAFE TIMESTAMP NORMALIZER
+    # ======================================================
+
+    def normalize_timestamp(value, field_name, sbrn=None):
+
+        # NULL
+        if value is None:
+            return None
+
+        # Empty string / NULL-like values
+        if isinstance(value, str):
+
+            value = value.strip()
+
+            if value == "":
+                return None
+
+            if value.upper() in (
+                "NULL",
+                "NONE",
+                "NAN",
+            ):
+                return None
+
+        # Already datetime
+        if isinstance(value, datetime):
+            return value
+
+        # Convert string
+        try:
+
+            value = str(value).strip()
+
+            # ISO format
+            if "T" in value:
+
+                value = value.replace("Z", "+00:00")
+
+                return datetime.fromisoformat(value)
+
+            # Normal PostgreSQL/SQLite formats
+            formats = [
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M",
+                "%Y-%m-%d",
+                "%d-%m-%Y %H:%M:%S",
+                "%d-%m-%Y %H:%M",
+                "%d-%m-%Y",
+            ]
+
+            for fmt in formats:
+
+                try:
+                    return datetime.strptime(value, fmt)
+
+                except ValueError:
+                    continue
+
+        except Exception:
+            pass
+
+        print(
+            f"⚠ Invalid {field_name} "
+            f"for SBRN {sbrn}: {value!r} → NULL"
+        )
+
+        return None
+
+    # ======================================================
+    # NORMALIZE ALL STUDENTS
+    # ======================================================
+
     normalized = []
 
     for r in records:
 
+        if not isinstance(r, dict):
+            continue
+
         # --------------------------------------------------
-        # 🔒 Critical validation
+        # SBRN
         # --------------------------------------------------
+
         sbrn = r.get("sbrn")
+
+        if sbrn is None:
+            continue
+
+        sbrn = str(sbrn).strip()
+
         if not sbrn:
             continue
 
         # --------------------------------------------------
-        # SAFE VERSION PARSE
+        # VERSION
         # --------------------------------------------------
+
         try:
             version = int(r.get("version") or 1)
+
         except Exception:
             version = 1
 
         # --------------------------------------------------
-        # SAFE SESSION YEAR (AUTO DERIVE FROM SBRN)
+        # SESSION YEAR
         # --------------------------------------------------
 
         session_year = r.get("session_year")
 
-        if not session_year or str(session_year).strip() == "":
+        if (
+            session_year is None
+            or str(session_year).strip() == ""
+        ):
 
             try:
-                sbrn = str(r.get("sbrn", ""))
 
                 if len(sbrn) >= 2:
 
                     year_prefix = int(sbrn[:2])
-                    session_year = str(2000 + year_prefix)
+
+                    session_year = str(
+                        2000 + year_prefix
+                    )
 
             except Exception:
+
                 session_year = None
+
+        # --------------------------------------------------
+        # ACADEMIC STATUS
+        # --------------------------------------------------
+
+        academic_status = r.get(
+            "academic_status"
+        )
+
+        if (
+            academic_status is None
+            or str(academic_status).strip() == ""
+        ):
+
+            academic_status = "ACTIVE"
+
+        else:
+
+            academic_status = (
+                str(academic_status)
+                .strip()
+                .upper()
+                .replace(" ", "_")
+            )
+
+        # --------------------------------------------------
+        # SAFE INTEGER FIELDS
+        # --------------------------------------------------
+
+        try:
+            is_deleted = int(
+                r.get("is_deleted") or 0
+            )
+        except Exception:
+            is_deleted = 0
+
+        try:
+            status_locked = int(
+                r.get("status_locked") or 0
+            )
+        except Exception:
+            status_locked = 0
+
+        try:
+            status_priority = int(
+                r.get("status_priority") or 0
+            )
+        except Exception:
+            status_priority = 0
+
+        # --------------------------------------------------
+        # TIMESTAMP FIELDS
+        # --------------------------------------------------
+
+        last_updated = normalize_timestamp(
+            r.get("last_updated"),
+            "last_updated",
+            sbrn
+        )
+
+        deleted_at = normalize_timestamp(
+            r.get("deleted_at"),
+            "deleted_at",
+            sbrn
+        )
+
+        # last_updated MUST have a value
+        if last_updated is None:
+            last_updated = datetime.now()
+
+        # --------------------------------------------------
+        # BUILD RECORD
+        # --------------------------------------------------
 
         normalized.append({
 
             "sbrn": sbrn,
+
             "sync_id": r.get("sync_id"),
+
             "name": r.get("name"),
+
             "semester": r.get("semester"),
+
             "section": r.get("section"),
+
             "department": r.get("department"),
 
             "session_year": session_year,
+
             "mobile_no": r.get("mobile_no"),
+
             "father_name": r.get("father_name"),
+
             "district": r.get("district"),
+
             "photo": r.get("photo"),
 
             "dob": r.get("dob"),
+
             "address": r.get("address"),
+
             "state": r.get("state"),
+
             "pincode": r.get("pincode"),
+
             "gender": r.get("gender"),
+
             "sr_no": r.get("sr_no"),
 
             "course": r.get("course"),
-            "batch": r.get("batch"),
-            "admission_date": r.get("admission_date"),
-            "year_semester": r.get("year_semester"),
-            "academic_status": r.get("academic_status", "REGULAR"),
 
-            "last_updated": r.get("last_updated") or datetime.utcnow(),
+            "batch": r.get("batch"),
+
+            "admission_date": r.get("admission_date"),
+
+            "year_semester": r.get("year_semester"),
+
+            "academic_status": academic_status,
+
+            "last_updated": last_updated,
+
             "version": version,
-            "is_deleted": r.get("is_deleted", 0),
-            "deleted_at": r.get("deleted_at"),
+
+            "is_deleted": is_deleted,
+
+            "deleted_at": deleted_at,
+
+            "status_locked": status_locked,
+
+            "status_priority": status_priority,
         })
 
+    # ======================================================
+    # VALIDATION
+    # ======================================================
+
     if not normalized:
-        return {"status": "no_valid_records"}
+
+        return {
+            "status": "no_valid_records"
+        }
+
+    print(
+        f"👨‍🎓 Student records normalized: "
+        f"{len(normalized)}"
+    )
+
+    # ======================================================
+    # DATABASE
+    # ======================================================
 
     conn = connect_db()
     cur = conn.cursor()
 
-    # --------------------------------------------------
-    # REMOVE DUPLICATE SBRN
-    # --------------------------------------------------
-    sbrns = list({r["sbrn"] for r in normalized})
-
-    if not sbrns:
-        release_db(conn)
-        return {"status": "no_valid_records"}
-
-    placeholders = ",".join(["%s"] * len(sbrns))
-
-    # --------------------------------------------------
-    # FETCH EXISTING CLOUD VERSIONS
-    # --------------------------------------------------
-    cur.execute(f"""
-        SELECT sbrn, version
-        FROM students
-        WHERE sbrn IN ({placeholders})
-    """, sbrns)
-
-    existing_versions = {
-        r[0]: (r[1] or 0) for r in cur.fetchall()
-    }
-
-    # --------------------------------------------------
-    # FILTER ONLY NEWER RECORDS
-    # --------------------------------------------------
-    filtered = []
-
-    for r in normalized:
-
-        cloud_version = existing_versions.get(r["sbrn"], 0) or 0
-        local_version = r.get("version") or 0
-
-        try:
-            if int(local_version) >= int(cloud_version):
-                filtered.append(r)
-        except Exception:
-            filtered.append(r)
-
-    if not filtered:
-        release_db(conn)
-        print(f"⚡ Students skipped (up-to-date): {len(normalized)}")
-        return {"status": "up_to_date"}
-
-    # --------------------------------------------------
-    # UPSERT QUERY
-    # --------------------------------------------------
-    query = """
-    INSERT INTO students
-    (
-        sbrn,
-        sync_id,
-        name,
-        semester,
-        section,
-        department,
-
-        session_year,
-        mobile_no,
-        father_name,
-        district,
-        photo,
-
-        dob,
-        address,
-        state,
-        pincode,
-        gender,
-        sr_no,
-
-        course,
-        batch,
-        admission_date,
-        year_semester,
-        academic_status,
-
-        last_updated,
-        version,
-        is_deleted,
-        deleted_at
-    )
-    VALUES
-    (
-        %(sbrn)s,
-        %(sync_id)s,
-        %(name)s,
-        %(semester)s,
-        %(section)s,
-        %(department)s,
-
-        %(session_year)s,
-        %(mobile_no)s,
-        %(father_name)s,
-        %(district)s,
-        %(photo)s,
-
-        %(dob)s,
-        %(address)s,
-        %(state)s,
-        %(pincode)s,
-        %(gender)s,
-        %(sr_no)s,
-
-        %(course)s,
-        %(batch)s,
-        %(admission_date)s,
-        %(year_semester)s,
-        %(academic_status)s,
-
-        %(last_updated)s,
-        %(version)s,
-        %(is_deleted)s,
-        %(deleted_at)s
-    )
-
-    ON CONFLICT (sbrn)
-    DO UPDATE SET
-
-        name = EXCLUDED.name,
-        semester = EXCLUDED.semester,
-        section = EXCLUDED.section,
-        department = EXCLUDED.department,
-
-        session_year = EXCLUDED.session_year,
-        mobile_no = EXCLUDED.mobile_no,
-        father_name = EXCLUDED.father_name,
-        district = EXCLUDED.district,
-        photo = EXCLUDED.photo,
-
-        dob = EXCLUDED.dob,
-        address = EXCLUDED.address,
-        state = EXCLUDED.state,
-        pincode = EXCLUDED.pincode,
-        gender = EXCLUDED.gender,
-        sr_no = EXCLUDED.sr_no,
-
-        course = EXCLUDED.course,
-        batch = EXCLUDED.batch,
-        admission_date = EXCLUDED.admission_date,
-        year_semester = EXCLUDED.year_semester,
-
-        academic_status = CASE
-            WHEN students.status_locked = 1 THEN students.academic_status
-            ELSE EXCLUDED.academic_status
-        END,
-
-        
-
-        last_updated = EXCLUDED.last_updated,
-        version = EXCLUDED.version,
-        is_deleted = EXCLUDED.is_deleted,
-        deleted_at = EXCLUDED.deleted_at
-
-    WHERE 
-    (
-        students.version < EXCLUDED.version
-    )
-    OR
-    (
-        students.version = EXCLUDED.version
-        AND COALESCE(students.status_priority,0) < COALESCE(EXCLUDED.status_priority,0)
-    );
-    """
-
     try:
 
-        execute_batch(cur, query, filtered)
+        # ==================================================
+        # EXISTING VERSIONS
+        # ==================================================
+
+        sbrns = list({
+            r["sbrn"]
+            for r in normalized
+        })
+
+        placeholders = ",".join(
+            ["%s"] * len(sbrns)
+        )
+
+        cur.execute(
+            f"""
+            SELECT
+                sbrn,
+                version
+            FROM students
+            WHERE sbrn IN ({placeholders})
+            """,
+            sbrns
+        )
+
+        existing_versions = {
+            row[0]: (row[1] or 0)
+            for row in cur.fetchall()
+        }
+
+        # ==================================================
+        # FILTER RECORDS
+        # ==================================================
+
+        filtered = []
+
+        for r in normalized:
+
+            cloud_version = (
+                existing_versions.get(
+                    r["sbrn"],
+                    0
+                )
+                or 0
+            )
+
+            local_version = (
+                r.get("version")
+                or 1
+            )
+
+            try:
+
+                # Allow equal version.
+                # This is important for CSV re-import
+                # where section/name/etc. changed.
+
+                if int(local_version) >= int(
+                    cloud_version
+                ):
+
+                    filtered.append(r)
+
+            except Exception:
+
+                filtered.append(r)
+
+        if not filtered:
+
+            release_db(conn)
+
+            print(
+                f"⚡ Students skipped: "
+                f"{len(normalized)}"
+            )
+
+            return {
+                "status": "up_to_date"
+            }
+
+        print(
+            f"📦 Students to UPSERT: "
+            f"{len(filtered)}"
+        )
+
+        # ==================================================
+        # UPSERT
+        # ==================================================
+
+        query = """
+
+        INSERT INTO students
+        (
+            sbrn,
+            sync_id,
+            name,
+            semester,
+            section,
+            department,
+
+            session_year,
+            mobile_no,
+            father_name,
+            district,
+            photo,
+
+            dob,
+            address,
+            state,
+            pincode,
+            gender,
+            sr_no,
+
+            course,
+            batch,
+            admission_date,
+            year_semester,
+            academic_status,
+
+            last_updated,
+            version,
+            is_deleted,
+            deleted_at,
+
+            status_locked,
+            status_priority
+        )
+
+        VALUES
+        (
+            %(sbrn)s,
+            %(sync_id)s,
+            %(name)s,
+            %(semester)s,
+            %(section)s,
+            %(department)s,
+
+            %(session_year)s,
+            %(mobile_no)s,
+            %(father_name)s,
+            %(district)s,
+            %(photo)s,
+
+            %(dob)s,
+            %(address)s,
+            %(state)s,
+            %(pincode)s,
+            %(gender)s,
+            %(sr_no)s,
+
+            %(course)s,
+            %(batch)s,
+            %(admission_date)s,
+            %(year_semester)s,
+            %(academic_status)s,
+
+            %(last_updated)s,
+            %(version)s,
+            %(is_deleted)s,
+            %(deleted_at)s,
+
+            %(status_locked)s,
+            %(status_priority)s
+        )
+
+        ON CONFLICT (sbrn)
+
+        DO UPDATE SET
+
+            sync_id =
+                EXCLUDED.sync_id,
+
+            name =
+                EXCLUDED.name,
+
+            semester =
+                EXCLUDED.semester,
+
+            section =
+                EXCLUDED.section,
+
+            department =
+                EXCLUDED.department,
+
+            session_year =
+                EXCLUDED.session_year,
+
+            mobile_no =
+                EXCLUDED.mobile_no,
+
+            father_name =
+                EXCLUDED.father_name,
+
+            district =
+                EXCLUDED.district,
+
+            photo =
+                EXCLUDED.photo,
+
+            dob =
+                EXCLUDED.dob,
+
+            address =
+                EXCLUDED.address,
+
+            state =
+                EXCLUDED.state,
+
+            pincode =
+                EXCLUDED.pincode,
+
+            gender =
+                EXCLUDED.gender,
+
+            sr_no =
+                EXCLUDED.sr_no,
+
+            course =
+                EXCLUDED.course,
+
+            batch =
+                EXCLUDED.batch,
+
+            admission_date =
+                EXCLUDED.admission_date,
+
+            year_semester =
+                EXCLUDED.year_semester,
+
+            academic_status =
+                CASE
+                    WHEN students.status_locked = 1
+                    THEN students.academic_status
+                    ELSE EXCLUDED.academic_status
+                END,
+
+            last_updated =
+                EXCLUDED.last_updated,
+
+            version =
+                EXCLUDED.version,
+
+            is_deleted =
+                EXCLUDED.is_deleted,
+
+            deleted_at =
+                EXCLUDED.deleted_at,
+
+            status_priority =
+                EXCLUDED.status_priority
+
+        WHERE
+            students.version <= EXCLUDED.version
+
+            OR
+
+            COALESCE(
+                students.status_priority,
+                0
+            )
+            <
+            COALESCE(
+                EXCLUDED.status_priority,
+                0
+            );
+
+        """
+
+        # ==================================================
+        # EXECUTE
+        # ==================================================
+
+        print(
+            "🚀 Executing student UPSERT..."
+        )
+
+        execute_batch(
+            cur,
+            query,
+            filtered
+        )
 
         conn.commit()
 
-        # --------------------------------------------------
-        # REALTIME EVENT
-        # --------------------------------------------------
+        print(
+            f"✅ PostgreSQL updated successfully "
+            f"({len(filtered)} students)"
+        )
+
+        # ==================================================
+        # REALTIME BROADCAST
+        # ==================================================
+
         try:
+
             loop = asyncio.get_running_loop()
-            loop.create_task(broadcast_event("students"))
+
+            loop.create_task(
+                broadcast_event(
+                    "students"
+                )
+            )
+
         except RuntimeError:
             pass
 
     except Exception as e:
 
         conn.rollback()
+
+        print(
+            "❌ STUDENT POSTGRESQL SYNC FAILED:"
+        )
+
+        print(
+            "❌ ERROR:",
+            str(e)
+        )
+
+        # Print useful debugging information
+        import traceback
+
+        traceback.print_exc()
+
         release_db(conn)
 
         raise HTTPException(
@@ -2074,11 +2425,14 @@ def sync_students(records: list = Body(...)):
 
     release_db(conn)
 
+    # ======================================================
+    # SUCCESS RESPONSE
+    # ======================================================
+
     return {
         "status": "success",
         "rows_processed": len(filtered)
     }
-
 # ======================================================
 # 🔥 INCREMENTAL STUDENT SYNC (CLOUD → DESKTOP SAFE)
 # ======================================================
