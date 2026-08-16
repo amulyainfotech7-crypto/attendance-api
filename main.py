@@ -2715,22 +2715,42 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
             [f"%({c})s" for c in columns]
         )
 
-        update_cols = ",".join(
-            [
-                f"{c}=EXCLUDED.{c}"
-                for c in columns
-                if c not in pk_columns
-            ]
-        )
+        update_columns = [
+            c for c in columns
+            if c not in pk_columns
+        ]
 
-        query = f"""
-            INSERT INTO "{table_name}"
-            ({cols})
-            VALUES ({vals})
-            ON CONFLICT {conflict_key}
-            DO UPDATE SET
-            {update_cols}
-        """
+        if update_columns:
+
+            update_cols = ",".join(
+                f"{c}=EXCLUDED.{c}"
+                for c in update_columns
+            )
+
+            query = f"""
+                INSERT INTO "{table_name}"
+                ({cols})
+                VALUES ({vals})
+                ON CONFLICT {conflict_key}
+                DO UPDATE SET
+                    {update_cols}
+            """
+
+        else:
+
+            # ------------------------------------------------------
+            # PRIMARY-KEY-ONLY TABLE
+            # Example:
+            # holidays(date PRIMARY KEY)
+            # ------------------------------------------------------
+
+            query = f"""
+                INSERT INTO "{table_name}"
+                ({cols})
+                VALUES ({vals})
+                ON CONFLICT {conflict_key}
+                DO NOTHING
+            """
 
         # --------------------------------------------------
         # Ensure all keys exist
