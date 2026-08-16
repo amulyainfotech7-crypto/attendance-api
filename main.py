@@ -3290,7 +3290,7 @@ def get_activity_attendance():
     Returns all activity_attendance records from PostgreSQL.
     """
 
-    conn = get_db()
+    conn = connect_db()
 
     try:
 
@@ -3411,7 +3411,7 @@ def sync_activity_attendance(records: list):
             "rows_processed": 0
         }
 
-    conn = get_db()
+    conn = connect_db()
 
     try:
 
@@ -3583,7 +3583,7 @@ def sync_activity_attendance(records: list):
 # ============================================================
 
 @app.delete("/sync/activity_attendance")
-def delete_activity_attendance(records: list):
+def delete_activity_attendance(records: list = Body(...)):
     """
     Local → Cloud DELETE
 
@@ -3606,7 +3606,7 @@ def delete_activity_attendance(records: list):
             "rows_deleted": 0
         }
 
-    conn = get_db()
+    conn = connect_db()
 
     try:
 
