@@ -1616,7 +1616,171 @@ def delete_student(sbrn: str):
     finally:
         release_db(conn)
 
+# ======================================================
+# 🔥 GENERIC CLOUD DELETE
+# ======================================================
 
+@app.delete("/delete/{table}/{row_id}")
+def delete_cloud_row(table: str, row_id: str):
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    # --------------------------------------------------
+    # SECURITY: ONLY ALLOW REAL APPLICATION TABLES
+    # --------------------------------------------------
+
+    allowed_tables = {
+        "holidays",
+        "rooms",
+        "students",
+        "subjects",
+        "faculty",
+        "faculty_subject_map",
+        "subject_semester_map",
+        "timetable_slots",
+        "attendance_daily",
+        "activity_attendance",
+        "results_semester",
+        "result_subjects",
+        "exam_marks",
+        "master_attendance",
+    }
+
+    if table not in allowed_tables:
+        release_db(conn)
+
+        raise HTTPException(
+            status_code=403,
+            detail=f"Table '{table}' is not allowed for DELETE."
+        )
+
+    try:
+
+        # --------------------------------------------------
+        # HOLIDAYS
+        # --------------------------------------------------
+        if table == "holidays":
+
+            cur.execute(
+                """
+                DELETE FROM holidays
+                WHERE date = %s
+                """,
+                (row_id,)
+            )
+
+        # --------------------------------------------------
+        # STUDENTS
+        # --------------------------------------------------
+        elif table == "students":
+
+            cur.execute(
+                """
+                DELETE FROM students
+                WHERE sbrn = %s
+                """,
+                (row_id,)
+            )
+
+        # --------------------------------------------------
+        # ROOMS
+        # --------------------------------------------------
+        elif table == "rooms":
+
+            cur.execute(
+                """
+                DELETE FROM rooms
+                WHERE room_id = %s
+                """,
+                (row_id,)
+            )
+
+        # --------------------------------------------------
+        # SUBJECTS
+        # --------------------------------------------------
+        elif table == "subjects":
+
+            cur.execute(
+                """
+                DELETE FROM subjects
+                WHERE subject_id = %s
+                """,
+                (row_id,)
+            )
+
+        # --------------------------------------------------
+        # FACULTY
+        # --------------------------------------------------
+        elif table == "faculty":
+
+            cur.execute(
+                """
+                DELETE FROM faculty
+                WHERE faculty_id = %s
+                """,
+                (row_id,)
+            )
+
+        # --------------------------------------------------
+        # GENERIC FALLBACK
+        # --------------------------------------------------
+        else:
+
+            # For tables not having a special key above,
+            # use the standard "id" primary key.
+            cur.execute(
+                f"""
+                DELETE FROM "{table}"
+                WHERE id = %s
+                """,
+                (row_id,)
+            )
+
+        deleted_rows = cur.rowcount
+
+        conn.commit()
+
+        # --------------------------------------------------
+        # IDEMPOTENT DELETE
+        # --------------------------------------------------
+        #
+        # If the row is already gone, that is still a
+        # successful final state.
+        #
+        # This prevents permanent retry loops.
+        # --------------------------------------------------
+
+        print(
+            f"🗑 CLOUD DELETE → "
+            f"{table}:{row_id} "
+            f"(rows={deleted_rows})"
+        )
+
+        return {
+            "status": "deleted",
+            "table": table,
+            "row_id": row_id,
+            "rows_deleted": deleted_rows
+        }
+
+    except Exception as e:
+
+        conn.rollback()
+
+        print(
+            f"❌ CLOUD DELETE FAILED → "
+            f"{table}:{row_id}: {e}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
+        release_db(conn)
 # ======================================================
 # CHECK ATTENDANCE EXISTS (FIXED)
 # ======================================================
