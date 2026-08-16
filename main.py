@@ -781,7 +781,8 @@ def startup():
         """)
 
         # ======================================================
-        # ACTIVITY ATTENDANCE (NEW)
+        # ACTIVITY ATTENDANCE
+        # LOCAL ↔ CLOUD SYNC READY
         # ======================================================
 
         cur.execute("""
@@ -789,13 +790,22 @@ def startup():
                 id SERIAL PRIMARY KEY,
 
                 sbrn TEXT NOT NULL,
+
                 activity_type TEXT,
                 activity_name TEXT,
+
                 date DATE,
+
                 weightage DOUBLE PRECISION DEFAULT 1,
+
+                weight_theory DOUBLE PRECISION DEFAULT 0,
+                weight_practical DOUBLE PRECISION DEFAULT 0,
 
                 semester TEXT,
                 section TEXT,
+
+                session_year TEXT,
+                department TEXT,
 
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 version INTEGER DEFAULT 1,
@@ -803,11 +813,269 @@ def startup():
             )
         """)
 
-        # 🔥 PERFORMANCE INDEX (IMPORTANT)
+        # ======================================================
+        # SAFE COLUMN MIGRATION
+        # ======================================================
+
         cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_activity_lookup
-            ON activity_attendance (sbrn, semester, date)
+            ALTER TABLE activity_attendance
+            ADD COLUMN IF NOT EXISTS weight_theory
+            DOUBLE PRECISION DEFAULT 0
         """)
+
+        cur.execute("""
+            ALTER TABLE activity_attendance
+            ADD COLUMN IF NOT EXISTS weight_practical
+            DOUBLE PRECISION DEFAULT 0
+        """)
+
+        cur.execute("""
+            ALTER TABLE activity_attendance
+            ADD COLUMN IF NOT EXISTS session_year
+            TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE activity_attendance
+            ADD COLUMN IF NOT EXISTS department
+            TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE activity_attendance
+            ADD COLUMN IF NOT EXISTS last_updated
+            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        """)
+
+        cur.execute("""
+            ALTER TABLE activity_attendance
+            ADD COLUMN IF NOT EXISTS version
+            INTEGER DEFAULT 1
+        """)
+
+        cur.execute("""
+            ALTER TABLE activity_attendance
+            ADD COLUMN IF NOT EXISTS sync_pending
+            INTEGER DEFAULT 0
+        """)
+
+        # ======================================================
+        # SAFE DEFAULT REPAIR
+        # ======================================================
+
+        cur.execute("""
+            UPDATE activity_attendance
+            SET version = 1
+            WHERE version IS NULL
+        """)
+
+        cur.execute("""
+            UPDATE activity_attendance
+            SET sync_pending = 0
+            WHERE sync_pending IS NULL
+        """)
+
+        cur.execute("""
+            UPDATE activity_attendance
+            SET last_updated = CURRENT_TIMESTAMP
+            WHERE last_updated IS NULL
+        """)
+
+        # ======================================================
+        # PERFORMANCE INDEX
+        # ======================================================
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS
+            idx_activity_lookup
+            ON activity_attendance (
+                sbrn,
+                semester,
+                date
+            )
+        """)
+
+        # ======================================================
+        # ACTIVITY DATE INDEX
+        # ======================================================
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS
+            idx_activity_date
+            ON activity_attendance (
+                activity_type,
+                semester,
+                session_year,
+                date
+            )
+        """)
+
+        # ======================================================
+        # SYNC INDEX
+        # ======================================================
+
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS
+            idx_activity_sync
+            ON activity_attendance (
+                sync_pending,
+                last_updated
+            )
+        """)
+
+        # ======================================================
+        # CHECK FOR DUPLICATES
+        # ======================================================
+        #
+        # IMPORTANT:
+        # Do not automatically delete duplicate production data.
+        # If duplicates exist, stop before creating the unique index.
+        # ======================================================
+
+        cur.execute("""
+            SELECT
+                sbrn,
+                activity_type,
+                semester,
+                session_year,
+                date,
+                COUNT(*) AS duplicate_count
+            FROM activity_attendance
+            GROUP BY
+                sbrn,
+                activity_type,
+                semester,
+                session_year,
+                date
+            HAVING COUNT(*) > 1
+            LIMIT 1
+        """)
+
+        duplicate_row = cur.fetchone()
+
+        if duplicate_row:
+
+            raise RuntimeError(
+                "❌ Duplicate activity_attendance records detected. "
+                "The logical unique index was not created. "
+                "Please review the duplicate records before continuing."
+            )
+
+        # ======================================================
+        # LOGICAL UNIQUE KEY
+        # ======================================================
+        #
+        # Activity identity:
+        #
+        #   sbrn
+        #   activity_type
+        #   semester
+        #   session_year
+        #   date
+        #
+        # This logical identity is used for Local ↔ Cloud sync.
+        # SQLite/PostgreSQL auto-increment IDs are NOT used
+        # as the cross-database identity.
+        #
+        # ======================================================
+
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            uq_activity_attendance_sync_key
+            ON activity_attendance (
+                sbrn,
+                activity_type,
+                semester,
+                session_year,
+                date
+            )
+        """)
+
+        # ======================================================
+        # VERIFY ACTIVITY ATTENDANCE SCHEMA
+        # ======================================================
+
+        cur.execute("""
+            SELECT
+                column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+            AND table_name = 'activity_attendance'
+            ORDER BY ordinal_position
+        """)
+
+        activity_columns = [
+            row[0]
+            for row in cur.fetchall()
+        ]
+
+        required_activity_columns = [
+            "id",
+            "sbrn",
+            "activity_type",
+            "activity_name",
+            "date",
+            "weightage",
+            "weight_theory",
+            "weight_practical",
+            "semester",
+            "section",
+            "session_year",
+            "department",
+            "last_updated",
+            "version",
+            "sync_pending",
+        ]
+
+        missing_activity_columns = [
+            column
+            for column in required_activity_columns
+            if column not in activity_columns
+        ]
+
+        if missing_activity_columns:
+
+            raise RuntimeError(
+                "❌ activity_attendance schema incomplete. "
+                f"Missing columns: {missing_activity_columns}"
+            )
+
+        print(
+            "✅ activity_attendance schema verified"
+        )
+
+        print(
+            "   Columns:",
+            ", ".join(activity_columns)
+        )
+
+        # ======================================================
+        # VERIFY LOGICAL UNIQUE INDEX
+        # ======================================================
+
+        cur.execute("""
+            SELECT
+                indexname
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+            AND tablename = 'activity_attendance'
+            AND indexname = 'uq_activity_attendance_sync_key'
+        """)
+
+        if cur.fetchone():
+
+            print(
+                "✅ activity_attendance sync unique index verified"
+            )
+
+        else:
+
+            raise RuntimeError(
+                "❌ activity_attendance sync unique index "
+                "was not created."
+            )
+
+
         # ======================================================
         # PERFORMANCE INDEXES
         # ======================================================
@@ -827,13 +1095,24 @@ def startup():
             ON attendance_daily (last_updated);
         """)
 
+
+        # ======================================================
+        # COMMIT + RELEASE
+        # ======================================================
+
         conn.commit()
         release_db(conn)
 
-        print("✅ PostgreSQL Server Ready (SYNC ENABLED)")
+        print(
+            "✅ PostgreSQL Server Ready (SYNC ENABLED)"
+        )
 
-        threading.Thread(target=keep_server_awake, daemon=True).start()
+        threading.Thread(
+            target=keep_server_awake,
+            daemon=True
+        ).start()
 
+            
     except Exception as e:
         import traceback
         print("❌ STARTUP FAILED:")
@@ -2997,6 +3276,424 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         "status": "success",
         "rows": len(records)
     }
+
+
+# ============================================================
+# ACTIVITY ATTENDANCE — DEDICATED CLOUD SYNC
+# ============================================================
+
+@app.get("/sync/activity_attendance")
+def get_activity_attendance():
+    """
+    Cloud → Local
+
+    Returns all activity_attendance records from PostgreSQL.
+    """
+
+    conn = get_db()
+
+    try:
+
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                id,
+                sbrn,
+                activity_type,
+                activity_name,
+                date,
+                weightage,
+                weight_theory,
+                weight_practical,
+                semester,
+                section,
+                session_year,
+                department,
+                last_updated,
+                version,
+                sync_pending
+            FROM activity_attendance
+            ORDER BY
+                date,
+                activity_type,
+                semester,
+                session_year,
+                sbrn
+        """)
+
+        rows = cur.fetchall()
+
+        records = []
+
+        for row in rows:
+
+            records.append({
+                "id": row[0],
+                "sbrn": row[1],
+                "activity_type": row[2],
+                "activity_name": row[3],
+
+                "date": (
+                    row[4].isoformat()
+                    if row[4] is not None
+                    else None
+                ),
+
+                "weightage": row[5],
+                "weight_theory": row[6],
+                "weight_practical": row[7],
+
+                "semester": row[8],
+                "section": row[9],
+                "session_year": row[10],
+                "department": row[11],
+
+                "last_updated": (
+                    row[12].isoformat()
+                    if row[12] is not None
+                    else None
+                ),
+
+                "version": row[13],
+                "sync_pending": row[14],
+            })
+
+        return {
+            "status": "success",
+            "table": "activity_attendance",
+            "count": len(records),
+            "records": records
+        }
+
+    except Exception as e:
+
+        print(
+            "❌ Activity attendance cloud GET error:",
+            e
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
+        release_db(conn)
+
+
+# ============================================================
+# ACTIVITY ATTENDANCE — LOCAL → CLOUD
+# ============================================================
+
+@app.post("/sync/activity_attendance")
+def sync_activity_attendance(records: list):
+    """
+    Local → Cloud
+
+    Safely UPSERT activity attendance using the logical
+    activity identity rather than SQLite/PostgreSQL IDs.
+    """
+
+    if not isinstance(records, list):
+
+        raise HTTPException(
+            status_code=400,
+            detail="Payload must be a list."
+        )
+
+    if not records:
+
+        return {
+            "status": "success",
+            "table": "activity_attendance",
+            "rows_processed": 0
+        }
+
+    conn = get_db()
+
+    try:
+
+        cur = conn.cursor()
+
+        processed = 0
+
+        for rec in records:
+
+            if not isinstance(rec, dict):
+                continue
+
+            sbrn = str(
+                rec.get("sbrn", "")
+            ).strip()
+
+            activity_type = str(
+                rec.get("activity_type", "")
+            ).strip()
+
+            semester = str(
+                rec.get("semester", "")
+            ).strip()
+
+            session_year = str(
+                rec.get("session_year", "")
+            ).strip()
+
+            activity_date = rec.get("date")
+
+            if not (
+                sbrn
+                and activity_type
+                and semester
+                and session_year
+                and activity_date
+            ):
+                print(
+                    "⚠ Skipping incomplete activity record:",
+                    rec
+                )
+                continue
+
+            cur.execute("""
+                INSERT INTO activity_attendance (
+                    sbrn,
+                    activity_type,
+                    activity_name,
+                    date,
+                    weightage,
+                    weight_theory,
+                    weight_practical,
+                    semester,
+                    section,
+                    session_year,
+                    department,
+                    last_updated,
+                    version,
+                    sync_pending
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, 0
+                )
+
+                ON CONFLICT (
+                    sbrn,
+                    activity_type,
+                    semester,
+                    session_year,
+                    date
+                )
+
+                DO UPDATE SET
+
+                    activity_name =
+                        EXCLUDED.activity_name,
+
+                    weightage =
+                        EXCLUDED.weightage,
+
+                    weight_theory =
+                        EXCLUDED.weight_theory,
+
+                    weight_practical =
+                        EXCLUDED.weight_practical,
+
+                    section =
+                        EXCLUDED.section,
+
+                    department =
+                        EXCLUDED.department,
+
+                    last_updated =
+                        EXCLUDED.last_updated,
+
+                    version =
+                        GREATEST(
+                            activity_attendance.version,
+                            EXCLUDED.version
+                        ),
+
+                    sync_pending = 0
+            """, (
+                sbrn,
+
+                activity_type,
+
+                rec.get("activity_name"),
+
+                activity_date,
+
+                rec.get("weightage", 1),
+
+                rec.get("weight_theory", 0),
+
+                rec.get("weight_practical", 0),
+
+                semester,
+
+                rec.get("section"),
+
+                session_year,
+
+                rec.get("department"),
+
+                rec.get("last_updated"),
+
+                rec.get("version", 1),
+            ))
+
+            processed += 1
+
+        conn.commit()
+
+        print(
+            f"☁ Activity attendance accepted → "
+            f"{processed} rows"
+        )
+
+        return {
+            "status": "success",
+            "table": "activity_attendance",
+            "rows_processed": processed
+        }
+
+    except Exception as e:
+
+        conn.rollback()
+
+        print(
+            "❌ Activity attendance cloud POST error:",
+            e
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
+        release_db(conn)
+
+
+
+# ============================================================
+# ACTIVITY ATTENDANCE — CLOUD DELETE
+# ============================================================
+
+@app.delete("/sync/activity_attendance")
+def delete_activity_attendance(records: list):
+    """
+    Local → Cloud DELETE
+
+    Deletes specific activity attendance records using the
+    logical identity rather than database IDs.
+    """
+
+    if not isinstance(records, list):
+
+        raise HTTPException(
+            status_code=400,
+            detail="Payload must be a list."
+        )
+
+    if not records:
+
+        return {
+            "status": "success",
+            "table": "activity_attendance",
+            "rows_deleted": 0
+        }
+
+    conn = get_db()
+
+    try:
+
+        cur = conn.cursor()
+
+        deleted = 0
+
+        for rec in records:
+
+            if not isinstance(rec, dict):
+                continue
+
+            sbrn = str(
+                rec.get("sbrn", "")
+            ).strip()
+
+            activity_type = str(
+                rec.get("activity_type", "")
+            ).strip()
+
+            semester = str(
+                rec.get("semester", "")
+            ).strip()
+
+            session_year = str(
+                rec.get("session_year", "")
+            ).strip()
+
+            activity_date = rec.get("date")
+
+            if not (
+                sbrn
+                and activity_type
+                and semester
+                and session_year
+                and activity_date
+            ):
+                continue
+
+            cur.execute("""
+                DELETE FROM activity_attendance
+                WHERE
+                    sbrn = %s
+                    AND activity_type = %s
+                    AND semester = %s
+                    AND session_year = %s
+                    AND date = %s
+            """, (
+                sbrn,
+                activity_type,
+                semester,
+                session_year,
+                activity_date
+            ))
+
+            deleted += cur.rowcount
+
+        conn.commit()
+
+        print(
+            f"☁ Activity attendance DELETE accepted → "
+            f"{deleted} rows"
+        )
+
+        return {
+            "status": "success",
+            "table": "activity_attendance",
+            "rows_deleted": deleted
+        }
+
+    except Exception as e:
+
+        conn.rollback()
+
+        print(
+            "❌ Activity attendance cloud DELETE error:",
+            e
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
+        release_db(conn)
 
 # ======================================================
 # UNIVERSAL SYNC DOWNLOAD (SAFE + FAST)
