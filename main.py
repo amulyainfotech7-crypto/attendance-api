@@ -1860,7 +1860,7 @@ def get_students(department: str, semester: str, section: str):
     ]
 
 
-from fastapi import HTTPException
+from fastapi import Body, HTTPException
 
 # ======================================================
 # 🔥 DELETE STUDENT (CLOUD SIDE)
