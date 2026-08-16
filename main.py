@@ -3144,6 +3144,32 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
         if table_name == "students":
             all_columns.add("academic_status")
 
+
+        # ======================================================
+        # 🔥 UNIVERSAL LAST_UPDATED PROTECTION
+        # ======================================================
+
+        if "last_updated" in valid_columns:
+
+            cur.execute("""
+                SELECT CURRENT_TIMESTAMP
+            """)
+
+            server_time_row = cur.fetchone()
+
+            if server_time_row is None:
+                raise RuntimeError(
+                    "❌ PostgreSQL could not obtain CURRENT_TIMESTAMP"
+                )
+
+            server_now = server_time_row[0]
+
+            for rec in records:
+
+                if not rec.get("last_updated"):
+                    rec["last_updated"] = server_now
+
+
         columns = list(all_columns)
 
         if not columns:
