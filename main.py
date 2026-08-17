@@ -3276,7 +3276,16 @@ def universal_sync_upload(
                 )
 
         # ==================================================
-        # LAST_UPDATED PROTECTION
+        # 🔥 CANONICAL CLOUD TIMESTAMP
+        # ==================================================
+        #
+        # PostgreSQL is the authority for synchronization time.
+        #
+        # NEVER trust SQLite/client last_updated for cloud
+        # delta ordering.
+        #
+        # Every accepted record receives the PostgreSQL
+        # server timestamp.
         # ==================================================
 
         if "last_updated" in valid_columns:
@@ -3288,24 +3297,24 @@ def universal_sync_upload(
             server_time_row = cur.fetchone()
 
             if server_time_row is None:
-
                 raise RuntimeError(
-                    "❌ PostgreSQL could not obtain "
-                    "CURRENT_TIMESTAMP"
+                    "❌ PostgreSQL could not obtain CURRENT_TIMESTAMP"
                 )
 
             server_now = server_time_row[0]
 
             for rec in records:
 
-                # ------------------------------------------
-                # Always use PostgreSQL server time
-                # when incoming timestamp is missing.
-                # ------------------------------------------
+                # --------------------------------------------------
+                # ALWAYS overwrite client timestamp
+                # --------------------------------------------------
 
-                if not rec.get("last_updated"):
+                rec["last_updated"] = server_now
 
-                    rec["last_updated"] = server_now
+                print(
+                    f"☁ Canonical cloud timestamp: "
+                    f"{server_now}"
+                )
 
         # ==================================================
         # FINAL COLUMN LIST
