@@ -3010,33 +3010,65 @@ def sync_students_from_cloud(
 # UNIVERSAL SYNC UPLOAD (AUTO PRIMARY KEY DETECTION)
 # ======================================================
 @app.post("/sync-generic/{table_name}")
-def universal_sync_upload(table_name: str, records: list = Body(...)):
+def universal_sync_upload(
+    table_name: str,
+    records: list = Body(...)
+):
 
     allowed_tables = get_sync_tables()
 
     if table_name not in allowed_tables:
-        raise HTTPException(status_code=400, detail="Invalid table")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid table"
+        )
 
     if not records:
-        return {"status": "no_data"}
+        return {
+            "status": "no_data",
+            "rows": 0
+        }
 
     # ======================================================
-    # DEBUG (VERY IMPORTANT)
+    # DEBUG
     # ======================================================
+
     print("\n" + "=" * 80)
-    print(f"🌐 SYNC REQUEST RECEIVED")
+    print("🌐 SYNC REQUEST RECEIVED")
     print(f"📦 Table   : {table_name}")
     print(f"📄 Records : {len(records)}")
 
     if table_name == "students":
+
         print("\n📚 Student Payload:")
+
         for r in records:
+
             print(
                 f"   SBRN={r.get('sbrn')} | "
                 f"Semester={r.get('semester')} | "
                 f"Version={r.get('version')} | "
                 f"Sync={r.get('sync_pending')} | "
                 f"Status={r.get('academic_status')}"
+            )
+
+    elif table_name in (
+        "exam_marks",
+        "result_subjects",
+        "results_semester"
+    ):
+
+        print("\n📚 Result Payload:")
+
+        for r in records:
+
+            print(
+                f"   SBRN={r.get('sbrn')} | "
+                f"Subject={r.get('subject_id')} | "
+                f"Marks={r.get('marks')} | "
+                f"Max={r.get('max_marks')} | "
+                f"Version={r.get('version')} | "
+                f"Sync={r.get('sync_pending')}"
             )
 
     print("=" * 80)
@@ -3046,9 +3078,10 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
 
     try:
 
-        # ======================================================
+        # ==================================================
         # STUDENT STATUS PROTECTION
-        # ======================================================
+        # ==================================================
+
         if table_name == "students":
 
             for row in records:
@@ -3066,8 +3099,16 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
 
                 existing = cur.fetchone()
 
-                existing_status = (existing[0] if existing else "").upper()
-                incoming_status = (row.get("academic_status") or "").upper()
+                existing_status = (
+                    existing[0]
+                    if existing and existing[0]
+                    else ""
+                ).upper()
+
+                incoming_status = (
+                    row.get("academic_status")
+                    or ""
+                ).upper()
 
                 if existing_status == "STRUCK_OFF":
 
@@ -3084,70 +3125,159 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
                 elif not incoming_status:
 
                     row["academic_status"] = (
-                        existing_status if existing else "REGULAR"
+                        existing_status
+                        if existing
+                        else "REGULAR"
                     )
 
                 else:
 
                     row["academic_status"] = incoming_status
 
-        # --------------------------------------------------
-        # Detect table columns
-        # --------------------------------------------------
+        # ==================================================
+        # DETECT TABLE COLUMNS
+        # ==================================================
+
         cur.execute("""
             SELECT column_name
             FROM information_schema.columns
-            WHERE table_name=%s
+            WHERE table_schema = 'public'
+              AND table_name = %s
         """, (table_name,))
 
-        valid_columns = {r[0] for r in cur.fetchall()}
+        valid_columns = {
+            r[0]
+            for r in cur.fetchall()
+        }
 
         if not valid_columns:
+
             raise HTTPException(
                 status_code=400,
                 detail=f"Table '{table_name}' not found."
             )
 
-        # --------------------------------------------------
-        # Detect PRIMARY KEY
-        # --------------------------------------------------
+        print(
+            f"🧱 PostgreSQL columns detected: "
+            f"{sorted(valid_columns)}"
+        )
+
+        # ==================================================
+        # DETECT PRIMARY KEY
+        # ==================================================
+
         cur.execute("""
             SELECT a.attname
             FROM pg_index i
             JOIN pg_attribute a
-                 ON a.attrelid=i.indrelid
-                AND a.attnum=ANY(i.indkey)
-            WHERE i.indrelid=%s::regclass
+                 ON a.attrelid = i.indrelid
+                AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = %s::regclass
               AND i.indisprimary
+            ORDER BY array_position(i.indkey, a.attnum)
         """, (table_name,))
 
-        pk_columns = [r[0] for r in cur.fetchall()]
+        pk_columns = [
+            r[0]
+            for r in cur.fetchall()
+        ]
 
         if not pk_columns:
+
             raise HTTPException(
                 status_code=400,
                 detail=f"No primary key for {table_name}"
             )
 
-        conflict_key = "(" + ",".join(pk_columns) + ")"
+        conflict_key = (
+            "(" +
+            ",".join(pk_columns) +
+            ")"
+        )
 
-        # --------------------------------------------------
-        # Collect valid columns
-        # --------------------------------------------------
+        print(
+            f"🔑 Primary Key: {pk_columns}"
+        )
+
+        print(
+            f"🔐 Conflict Key: {conflict_key}"
+        )
+
+        # ==================================================
+        # COLLECT VALID COLUMNS
+        # ==================================================
+
         all_columns = set()
 
         for rec in records:
+
             for col in rec.keys():
+
                 if col in valid_columns:
+
                     all_columns.add(col)
 
+        # ==================================================
+        # STUDENTS STATUS
+        # ==================================================
+
         if table_name == "students":
-            all_columns.add("academic_status")
 
+            if "academic_status" in valid_columns:
 
-        # ======================================================
-        # 🔥 UNIVERSAL LAST_UPDATED PROTECTION
-        # ======================================================
+                all_columns.add(
+                    "academic_status"
+                )
+
+        # ==================================================
+        # 🔥 CRITICAL CLOUD SYNC FIX
+        # ==================================================
+        #
+        # LOCAL:
+        #
+        # sync_pending = 1
+        #
+        # means:
+        # "this row needs to be uploaded"
+        #
+        # CLOUD:
+        #
+        # sync_pending = 0
+        #
+        # means:
+        # "this row has already been received"
+        #
+        # Therefore NEVER copy the local pending
+        # state into PostgreSQL.
+        #
+        # ==================================================
+
+        if "sync_pending" in valid_columns:
+
+            all_columns.add(
+                "sync_pending"
+            )
+
+            for rec in records:
+
+                original_sync_state = (
+                    rec.get("sync_pending")
+                )
+
+                # ------------------------------------------
+                # FORCE CLOUD STATE TO 0
+                # ------------------------------------------
+
+                rec["sync_pending"] = 0
+
+                print(
+                    f"☁ Cloud sync state: "
+                    f"{original_sync_state} → 0"
+                )
+
+        # ==================================================
+        # LAST_UPDATED PROTECTION
+        # ==================================================
 
         if "last_updated" in valid_columns:
 
@@ -3158,41 +3288,70 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
             server_time_row = cur.fetchone()
 
             if server_time_row is None:
+
                 raise RuntimeError(
-                    "❌ PostgreSQL could not obtain CURRENT_TIMESTAMP"
+                    "❌ PostgreSQL could not obtain "
+                    "CURRENT_TIMESTAMP"
                 )
 
             server_now = server_time_row[0]
 
             for rec in records:
 
+                # ------------------------------------------
+                # Always use PostgreSQL server time
+                # when incoming timestamp is missing.
+                # ------------------------------------------
+
                 if not rec.get("last_updated"):
+
                     rec["last_updated"] = server_now
 
+        # ==================================================
+        # FINAL COLUMN LIST
+        # ==================================================
 
-        columns = list(all_columns)
+        columns = sorted(all_columns)
 
         if not columns:
+
             raise HTTPException(
                 status_code=400,
                 detail="No valid columns supplied."
             )
 
-        cols = ",".join(columns)
-
-        vals = ",".join(
-            [f"%({c})s" for c in columns]
+        print(
+            f"📋 UPSERT Columns: {columns}"
         )
 
+        # ==================================================
+        # BUILD SQL
+        # ==================================================
+
+        cols = ",".join(
+            f'"{c}"'
+            for c in columns
+        )
+
+        vals = ",".join(
+            f"%({c})s"
+            for c in columns
+        )
+
+        # ==================================================
+        # UPDATE COLUMNS
+        # ==================================================
+
         update_columns = [
-            c for c in columns
+            c
+            for c in columns
             if c not in pk_columns
         ]
 
         if update_columns:
 
-            update_cols = ",".join(
-                f"{c}=EXCLUDED.{c}"
+            update_cols = ",\n".join(
+                f'"{c}" = EXCLUDED."{c}"'
                 for c in update_columns
             )
 
@@ -3200,92 +3359,244 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
                 INSERT INTO "{table_name}"
                 ({cols})
                 VALUES ({vals})
+
                 ON CONFLICT {conflict_key}
+
                 DO UPDATE SET
                     {update_cols}
             """
 
         else:
 
-            # ------------------------------------------------------
-            # PRIMARY-KEY-ONLY TABLE
-            # Example:
-            # holidays(date PRIMARY KEY)
-            # ------------------------------------------------------
+            # ==================================================
+            # PRIMARY KEY ONLY TABLE
+            # ==================================================
 
             query = f"""
                 INSERT INTO "{table_name}"
                 ({cols})
                 VALUES ({vals})
+
                 ON CONFLICT {conflict_key}
+
                 DO NOTHING
             """
 
-        # --------------------------------------------------
-        # Ensure all keys exist
-        # --------------------------------------------------
+        # ==================================================
+        # ENSURE ALL KEYS EXIST
+        # ==================================================
+
         for rec in records:
 
             for col in columns:
 
                 if col not in rec:
+
                     rec[col] = None
 
-        # --------------------------------------------------
-        # DEBUG SQL
-        # --------------------------------------------------
-        print("\n🚀 Executing UPSERT...")
-        print("Table :", table_name)
-        print("Columns :", columns)
+        # ==================================================
+        # FINAL DEBUG
+        # ==================================================
 
-        execute_batch(cur, query, records)
+        print("\n" + "-" * 80)
+        print("🚀 EXECUTING POSTGRESQL UPSERT")
+        print(f"📦 Table       : {table_name}")
+        print(f"🔑 Primary Key : {pk_columns}")
+        print(f"📋 Columns     : {columns}")
+
+        if "sync_pending" in columns:
+
+            print(
+                "☁ Cloud sync_pending values:",
+                [
+                    r.get("sync_pending")
+                    for r in records
+                ]
+            )
+
+        print("-" * 80)
+
+        # ==================================================
+        # EXECUTE
+        # ==================================================
+
+        execute_batch(
+            cur,
+            query,
+            records
+        )
 
         conn.commit()
 
-        print(f"✅ PostgreSQL updated successfully ({len(records)} rows)")
+        print(
+            f"✅ PostgreSQL updated successfully "
+            f"({len(records)} rows)"
+        )
 
-        # --------------------------------------------------
-        # Verify student update
-        # --------------------------------------------------
-        if table_name == "students":
+        # ==================================================
+        # VERIFY EXAM MARKS
+        # ==================================================
 
-            print("\n🔍 Verifying PostgreSQL Data")
+        if table_name == "exam_marks":
+
+            print(
+                "\n🔍 VERIFYING exam_marks IN CLOUD"
+            )
 
             for row in records:
 
                 sbrn = row.get("sbrn")
+                semester = row.get("semester")
+                exam_type = row.get("exam_type")
+                subject_id = row.get("subject_id")
+
+                if not sbrn:
+                    continue
+
+                cur.execute("""
+                    SELECT
+                        id,
+                        sbrn,
+                        semester,
+                        exam_type,
+                        subject_id,
+                        marks,
+                        max_marks,
+                        version,
+                        sync_pending,
+                        last_updated
+                    FROM exam_marks
+                    WHERE sbrn=%s
+                      AND semester=%s
+                      AND exam_type=%s
+                      AND subject_id=%s
+                """, (
+                    sbrn,
+                    semester,
+                    exam_type,
+                    subject_id
+                ))
+
+                verify = cur.fetchone()
+
+                print(
+                    "☁ CLOUD exam_marks:",
+                    verify
+                )
+
+        # ==================================================
+        # VERIFY RESULT SUBJECTS
+        # ==================================================
+
+        elif table_name == "result_subjects":
+
+            print(
+                "\n🔍 VERIFYING result_subjects IN CLOUD"
+            )
+
+            for row in records:
+
+                sbrn = row.get("sbrn")
+                semester = row.get("semester")
+                subject_id = row.get("subject_id")
+
+                if not sbrn:
+                    continue
+
+                cur.execute("""
+                    SELECT *
+                    FROM result_subjects
+                    WHERE sbrn=%s
+                      AND semester=%s
+                      AND subject_id=%s
+                """, (
+                    sbrn,
+                    semester,
+                    subject_id
+                ))
+
+                verify = cur.fetchone()
+
+                print(
+                    "☁ CLOUD result_subjects:",
+                    verify
+                )
+
+        # ==================================================
+        # VERIFY STUDENTS
+        # ==================================================
+
+        elif table_name == "students":
+
+            print(
+                "\n🔍 VERIFYING students IN CLOUD"
+            )
+
+            for row in records:
+
+                sbrn = row.get("sbrn")
+
+                if not sbrn:
+                    continue
 
                 cur.execute("""
                     SELECT
                         sbrn,
                         semester,
                         version,
-                        academic_status
+                        academic_status,
+                        sync_pending,
+                        last_updated
                     FROM students
                     WHERE sbrn=%s
                 """, (sbrn,))
 
                 verify = cur.fetchone()
 
-                print("DB ROW:", verify)
+                print(
+                    "☁ CLOUD students:",
+                    verify
+                )
 
-        # --------------------------------------------------
-        # Broadcast
-        # --------------------------------------------------
+        # ==================================================
+        # BROADCAST
+        # ==================================================
+
         try:
+
             loop = asyncio.get_running_loop()
+
             loop.create_task(
-                broadcast_event(table_name)
+                broadcast_event(
+                    table_name
+                )
             )
+
         except RuntimeError:
+
             pass
+
+    # ======================================================
+    # ERROR HANDLING
+    # ======================================================
+
+    except HTTPException:
+
+        conn.rollback()
+
+        release_db(conn)
+
+        raise
 
     except Exception as e:
 
         conn.rollback()
 
-        print("\n❌ SYNC ERROR")
-        print(e)
+        print("\n" + "=" * 80)
+        print("❌ SYNC ERROR")
+        print(f"📦 Table: {table_name}")
+        print(f"❌ Error: {e}")
+        print("=" * 80)
 
         release_db(conn)
 
@@ -3294,15 +3605,23 @@ def universal_sync_upload(table_name: str, records: list = Body(...)):
             detail=str(e)
         )
 
+    # ======================================================
+    # RELEASE CONNECTION
+    # ======================================================
+
     release_db(conn)
 
-    print("✅ Sync Completed\n")
+    print(
+        f"✅ Sync Completed → {table_name}"
+    )
+
+    print("=" * 80 + "\n")
 
     return {
         "status": "success",
+        "table": table_name,
         "rows": len(records)
     }
-
 
 # ============================================================
 # ACTIVITY ATTENDANCE — DEDICATED CLOUD SYNC
