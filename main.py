@@ -1557,28 +1557,21 @@ def get_subjects_by_date(
     """
     Return timetable subjects with the REAL full subject name.
 
-    IMPORTANT:
-
-    The timetable uses the selected department.
-
-    Subject names are resolved from:
-        subjects
-        +
-        subject_semester_map
-
-    1st & 2nd Semester:
+    1st / 2nd Semester:
         Architecture Assistantship
             -> Architecture Assistantship
 
-        All other departments
+        Other departments
             -> Applied Sciences & Humanities
 
     3rd Semester onward:
         -> Actual selected department
 
-    IMPORTANT:
-        subject_id is retained for internal attendance operations.
-        subject_name is returned separately as the FULL subject name.
+    subject_id:
+        Internal identifier used by attendance/database.
+
+    subject_name:
+        Full subject name displayed in Flutter.
     """
 
     # ============================================================
@@ -1631,10 +1624,6 @@ def get_subjects_by_date(
 
     if semester_key in first_second_semesters:
 
-        # --------------------------------------------------------
-        # ARCHITECTURE ASSISTANTSHIP IS THE EXCEPTION
-        # --------------------------------------------------------
-
         if (
             department.lower()
             == "architecture assistantship".lower()
@@ -1642,19 +1631,10 @@ def get_subjects_by_date(
             subject_department = (
                 "Architecture Assistantship"
             )
-
-        # --------------------------------------------------------
-        # ALL OTHER 1st / 2nd SEMESTER DEPARTMENTS
-        # --------------------------------------------------------
-
         else:
             subject_department = (
                 "Applied Sciences & Humanities"
             )
-
-    # ============================================================
-    # 3RD SEMESTER ONWARD
-    # ============================================================
 
     else:
         subject_department = department
@@ -1707,7 +1687,7 @@ def get_subjects_by_date(
         )
 
     # ============================================================
-    # DATABASE CONNECTION
+    # DATABASE
     # ============================================================
 
     conn = connect_db()
@@ -1715,42 +1695,13 @@ def get_subjects_by_date(
 
     try:
 
-        # ========================================================
-        # GET SUBJECTS
-        # ========================================================
-        #
-        # IMPORTANT:
-        #
-        # t.subject_id
-        #       = actual scheduled subject ID
-        #
-        # sx.subject_name
-        #       = FULL subject name
-        #
-        # sm.department
-        #       = academic subject department
-        #
-        # The timetable department and subject department are
-        # intentionally handled separately.
-        # ========================================================
-
         cur.execute("""
             SELECT
                 t.subject_id,
 
-                /*
-                 * FULL SUBJECT NAME
-                 *
-                 * Do NOT replace this with subject_id unless
-                 * absolutely no full subject name exists.
-                 */
                 COALESCE(
                     NULLIF(
                         TRIM(s.subject_name),
-                        ''
-                    ),
-                    NULLIF(
-                        TRIM(t.subject_name),
                         ''
                     ),
                     t.subject_id
@@ -1769,9 +1720,7 @@ def get_subjects_by_date(
                     ','
                 ) AS sections,
 
-                MIN(
-                    t.period_no
-                ) AS first_period
+                MIN(t.period_no) AS first_period
 
             FROM timetable_slots t
 
@@ -1794,10 +1743,6 @@ def get_subjects_by_date(
 
                 WHERE
 
-                    # =================================================
-                    # SAME SUBJECT ID
-                    # =================================================
-
                     LOWER(
                         TRIM(sx.subject_id)
                     )
@@ -1808,10 +1753,6 @@ def get_subjects_by_date(
 
                     AND
 
-                    # =================================================
-                    # SAME SEMESTER
-                    # =================================================
-
                     LOWER(
                         TRIM(sm.semester)
                     )
@@ -1821,10 +1762,6 @@ def get_subjects_by_date(
                     )
 
                     AND
-
-                    # =================================================
-                    # CORRECT ACADEMIC DEPARTMENT
-                    # =================================================
 
                     (
                         LOWER(
@@ -1848,51 +1785,22 @@ def get_subjects_by_date(
                         ) = ''
                     )
 
-                    AND
-
-                    # =================================================
-                    # SUBJECT NAME MUST ACTUALLY EXIST
-                    # =================================================
-
-                    COALESCE(
-                        TRIM(
-                            sx.subject_name
-                        ),
+                    AND COALESCE(
+                        TRIM(sx.subject_name),
                         ''
                     ) <> ''
 
-                    AND
-
-                    # =================================================
-                    # IGNORE PLACEHOLDER RECORDS
-                    #
-                    # Example:
-                    #     subject_id   = BEE
-                    #     subject_name = BEE
-                    #
-                    # This is not a real full subject name.
-                    # =================================================
-
-                    LOWER(
-                        TRIM(
-                            sx.subject_name
-                        )
+                    AND LOWER(
+                        TRIM(sx.subject_name)
                     )
                     <>
                     LOWER(
-                        TRIM(
-                            sx.subject_id
-                        )
+                        TRIM(sx.subject_id)
                     )
 
                 ORDER BY
 
-                    # =================================================
-                    # EXACT DEPARTMENT MAPPING FIRST
-                    # =================================================
-
                     CASE
-
                         WHEN LOWER(
                             TRIM(
                                 COALESCE(
@@ -1905,37 +1813,13 @@ def get_subjects_by_date(
                         LOWER(
                             TRIM(%s)
                         )
-
                         THEN 0
-
                         ELSE 1
-
                     END
 
                 LIMIT 1
 
             ) s ON TRUE
-
-            # ========================================================
-            # TIMETABLE FILTER
-            # ========================================================
-            #
-            # IMPORTANT:
-            #
-            # We use the ORIGINAL selected department here.
-            #
-            # Example:
-            #
-            # Computer Engineering
-            # 1st Semester
-            #
-            # timetable_slots.department:
-            #     Computer Engineering
-            #
-            # subject_semester_map.department:
-            #     Applied Sciences & Humanities
-            #
-            # ========================================================
 
             WHERE
 
@@ -1978,30 +1862,12 @@ def get_subjects_by_date(
 
         """, (
 
-            # --------------------------------------------------------
-            # 1. Subject department
-            # --------------------------------------------------------
             subject_department,
-
-            # --------------------------------------------------------
-            # 2. Exact department priority
-            # --------------------------------------------------------
             subject_department,
-
-            # --------------------------------------------------------
-            # 3. Timetable department
-            # --------------------------------------------------------
             department,
-
-            # --------------------------------------------------------
-            # 4. Semester
-            # --------------------------------------------------------
             semester,
-
-            # --------------------------------------------------------
-            # 5. Day
-            # --------------------------------------------------------
             weekday_short
+
         ))
 
         rows = cur.fetchall()
@@ -2011,55 +1877,27 @@ def get_subjects_by_date(
             len(rows)
         )
 
-        # ============================================================
-        # BUILD API RESPONSE
-        # ============================================================
-
         result = []
 
         for r in rows:
-
-            # --------------------------------------------------------
-            # SUBJECT ID
-            #
-            # Keep this for attendance/database operations.
-            # --------------------------------------------------------
 
             subject_id = str(
                 r[0] or ""
             ).strip()
 
-            # --------------------------------------------------------
-            # FULL SUBJECT NAME
-            #
-            # This is what Flutter displays.
-            # --------------------------------------------------------
-
             subject_name = str(
                 r[1] or ""
             ).strip()
 
-            # --------------------------------------------------------
-            # SUBJECT TYPE
-            # --------------------------------------------------------
-
             subject_type = str(
                 r[2] or ""
             ).strip()
-
-            # --------------------------------------------------------
-            # SECTIONS
-            # --------------------------------------------------------
 
             sections = (
                 r[3].split(",")
                 if r[3]
                 else []
             )
-
-            # --------------------------------------------------------
-            # DEBUG
-            # --------------------------------------------------------
 
             print(
                 "📚 SUBJECT API → "
@@ -2069,31 +1907,15 @@ def get_subjects_by_date(
                 f"SUBJECT_DEPT={subject_department}"
             )
 
-            # --------------------------------------------------------
-            # API RESPONSE
-            # --------------------------------------------------------
-
             result.append({
-
-                # Internal subject identifier
-                "subject_id":
-                    subject_id,
-
-                # FULL subject name
-                "subject_name":
-                    subject_name,
-
-                # Theory / Practical
-                "type":
-                    subject_type,
-
-                # Sections
+                "subject_id": subject_id,
+                "subject_name": subject_name,
+                "type": subject_type,
                 "sections": [
                     s.strip()
                     for s in sections
                     if s.strip()
                 ]
-
             })
 
         return result
