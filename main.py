@@ -1557,21 +1557,127 @@ def get_subjects_by_date(
     """
     Return timetable subjects with the REAL full subject name.
 
-    timetable_slots:
-        subject_id = source for scheduled subject
+    IMPORTANT:
 
-    subjects:
-        subject_name/type = source for subject details
+    The timetable uses the selected department.
 
-    subject_semester_map:
-        semester + department = source for subject mapping
+    Subject names are resolved from:
+        subjects
+        +
+        subject_semester_map
 
-    Placeholder subject rows where:
-        subject_name == subject_id
-    are ignored.
+    1st & 2nd Semester:
+        Architecture Assistantship
+            -> Architecture Assistantship
+
+        All other departments
+            -> Applied Sciences & Humanities
+
+    3rd Semester onward:
+        -> Actual selected department
+
+    IMPORTANT:
+        subject_id is retained for internal attendance operations.
+        subject_name is returned separately as the FULL subject name.
     """
 
+    # ============================================================
+    # NORMALIZE INPUT
+    # ============================================================
+
+    department = str(
+        department or ""
+    ).strip()
+
+    semester = str(
+        semester or ""
+    ).strip()
+
+    if not department:
+        raise HTTPException(
+            status_code=400,
+            detail="Department is required"
+        )
+
+    if not semester:
+        raise HTTPException(
+            status_code=400,
+            detail="Semester is required"
+        )
+
+    # ============================================================
+    # RESOLVE SUBJECT DEPARTMENT
+    # ============================================================
+
+    semester_key = semester.lower().strip()
+
+    first_second_semesters = {
+        "1",
+        "1st",
+        "first",
+        "first semester",
+        "semester 1",
+        "sem 1",
+        "1st semester",
+
+        "2",
+        "2nd",
+        "second",
+        "second semester",
+        "semester 2",
+        "sem 2",
+        "2nd semester",
+    }
+
+    if semester_key in first_second_semesters:
+
+        # --------------------------------------------------------
+        # ARCHITECTURE ASSISTANTSHIP IS THE EXCEPTION
+        # --------------------------------------------------------
+
+        if (
+            department.lower()
+            == "architecture assistantship".lower()
+        ):
+            subject_department = (
+                "Architecture Assistantship"
+            )
+
+        # --------------------------------------------------------
+        # ALL OTHER 1st / 2nd SEMESTER DEPARTMENTS
+        # --------------------------------------------------------
+
+        else:
+            subject_department = (
+                "Applied Sciences & Humanities"
+            )
+
+    # ============================================================
+    # 3RD SEMESTER ONWARD
+    # ============================================================
+
+    else:
+        subject_department = department
+
+    print("=" * 80)
+    print("📚 SUBJECT API DEPARTMENT RESOLUTION")
+    print(
+        f"Selected Department : {department}"
+    )
+    print(
+        f"Semester            : {semester}"
+    )
+    print(
+        f"Subject Department  : {subject_department}"
+    )
+    print("=" * 80)
+
+    # ============================================================
+    # DATE VALIDATION
+    # ============================================================
+
     try:
+
         parsed_date = datetime.strptime(
             date,
             "%Y-%m-%d"
@@ -1587,30 +1693,74 @@ def get_subjects_by_date(
             )
             return []
 
-        weekday_short = parsed_date.strftime("%a").strip()
+        weekday_short = (
+            parsed_date
+            .strftime("%a")
+            .strip()
+        )
 
     except ValueError:
+
         raise HTTPException(
             status_code=400,
             detail="Invalid date format"
         )
+
+    # ============================================================
+    # DATABASE CONNECTION
+    # ============================================================
 
     conn = connect_db()
     cur = conn.cursor()
 
     try:
 
+        # ========================================================
+        # GET SUBJECTS
+        # ========================================================
+        #
+        # IMPORTANT:
+        #
+        # t.subject_id
+        #       = actual scheduled subject ID
+        #
+        # sx.subject_name
+        #       = FULL subject name
+        #
+        # sm.department
+        #       = academic subject department
+        #
+        # The timetable department and subject department are
+        # intentionally handled separately.
+        # ========================================================
+
         cur.execute("""
             SELECT
                 t.subject_id,
 
+                /*
+                 * FULL SUBJECT NAME
+                 *
+                 * Do NOT replace this with subject_id unless
+                 * absolutely no full subject name exists.
+                 */
                 COALESCE(
-                    NULLIF(TRIM(s.subject_name), ''),
+                    NULLIF(
+                        TRIM(s.subject_name),
+                        ''
+                    ),
+                    NULLIF(
+                        TRIM(t.subject_name),
+                        ''
+                    ),
                     t.subject_id
                 ) AS subject_name,
 
                 COALESCE(
-                    NULLIF(TRIM(s.type), ''),
+                    NULLIF(
+                        TRIM(s.type),
+                        ''
+                    ),
                     t.type
                 ) AS type,
 
@@ -1619,7 +1769,9 @@ def get_subjects_by_date(
                     ','
                 ) AS sections,
 
-                MIN(t.period_no) AS first_period
+                MIN(
+                    t.period_no
+                ) AS first_period
 
             FROM timetable_slots t
 
@@ -1632,85 +1784,188 @@ def get_subjects_by_date(
                 FROM subjects sx
 
                 INNER JOIN subject_semester_map sm
-                    ON LOWER(TRIM(sm.subject_id))
-                       =
-                       LOWER(TRIM(sx.subject_id))
-
-                WHERE
-                    LOWER(TRIM(sx.subject_id))
-                        =
-                    LOWER(TRIM(t.subject_id))
-
-                    AND
-
-                    LOWER(TRIM(sm.semester))
-                        =
-                    LOWER(TRIM(t.semester))
-
-                    AND
-
-                    (
-                        LOWER(TRIM(COALESCE(sm.department, '')))
-                            =
-                        LOWER(TRIM(t.department))
-
-                        OR
-
-                        COALESCE(TRIM(sm.department), '') = ''
+                    ON LOWER(
+                        TRIM(sm.subject_id)
                     )
-
-                    -- Ignore placeholder:
-                    -- AS -> AS
-                    AND COALESCE(
-                        TRIM(sx.subject_name),
-                        ''
-                    ) <> ''
-
-                    AND LOWER(
-                        TRIM(sx.subject_name)
-                    )
-                    <>
+                    =
                     LOWER(
                         TRIM(sx.subject_id)
                     )
 
-                ORDER BY
+                WHERE
 
-                    -- Exact department mapping first
-                    CASE
-                        WHEN LOWER(
-                            TRIM(COALESCE(sm.department, ''))
+                    # =================================================
+                    # SAME SUBJECT ID
+                    # =================================================
+
+                    LOWER(
+                        TRIM(sx.subject_id)
+                    )
+                    =
+                    LOWER(
+                        TRIM(t.subject_id)
+                    )
+
+                    AND
+
+                    # =================================================
+                    # SAME SEMESTER
+                    # =================================================
+
+                    LOWER(
+                        TRIM(sm.semester)
+                    )
+                    =
+                    LOWER(
+                        TRIM(t.semester)
+                    )
+
+                    AND
+
+                    # =================================================
+                    # CORRECT ACADEMIC DEPARTMENT
+                    # =================================================
+
+                    (
+                        LOWER(
+                            TRIM(
+                                COALESCE(
+                                    sm.department,
+                                    ''
+                                )
+                            )
                         )
                         =
                         LOWER(
-                            TRIM(t.department)
+                            TRIM(%s)
                         )
+
+                        OR
+
+                        COALESCE(
+                            TRIM(sm.department),
+                            ''
+                        ) = ''
+                    )
+
+                    AND
+
+                    # =================================================
+                    # SUBJECT NAME MUST ACTUALLY EXIST
+                    # =================================================
+
+                    COALESCE(
+                        TRIM(
+                            sx.subject_name
+                        ),
+                        ''
+                    ) <> ''
+
+                    AND
+
+                    # =================================================
+                    # IGNORE PLACEHOLDER RECORDS
+                    #
+                    # Example:
+                    #     subject_id   = BEE
+                    #     subject_name = BEE
+                    #
+                    # This is not a real full subject name.
+                    # =================================================
+
+                    LOWER(
+                        TRIM(
+                            sx.subject_name
+                        )
+                    )
+                    <>
+                    LOWER(
+                        TRIM(
+                            sx.subject_id
+                        )
+                    )
+
+                ORDER BY
+
+                    # =================================================
+                    # EXACT DEPARTMENT MAPPING FIRST
+                    # =================================================
+
+                    CASE
+
+                        WHEN LOWER(
+                            TRIM(
+                                COALESCE(
+                                    sm.department,
+                                    ''
+                                )
+                            )
+                        )
+                        =
+                        LOWER(
+                            TRIM(%s)
+                        )
+
                         THEN 0
 
-                        -- COMMON / blank department second
                         ELSE 1
+
                     END
 
                 LIMIT 1
 
             ) s ON TRUE
 
+            # ========================================================
+            # TIMETABLE FILTER
+            # ========================================================
+            #
+            # IMPORTANT:
+            #
+            # We use the ORIGINAL selected department here.
+            #
+            # Example:
+            #
+            # Computer Engineering
+            # 1st Semester
+            #
+            # timetable_slots.department:
+            #     Computer Engineering
+            #
+            # subject_semester_map.department:
+            #     Applied Sciences & Humanities
+            #
+            # ========================================================
+
             WHERE
-                LOWER(TRIM(t.department))
-                    =
-                LOWER(TRIM(%s))
+
+                LOWER(
+                    TRIM(t.department)
+                )
+                =
+                LOWER(
+                    TRIM(%s)
+                )
 
                 AND
 
-                LOWER(TRIM(t.semester))
-                    =
-                LOWER(TRIM(%s))
+                LOWER(
+                    TRIM(t.semester)
+                )
+                =
+                LOWER(
+                    TRIM(%s)
+                )
 
                 AND
 
-                LOWER(TRIM(t.day))
-                    =
-                LOWER(TRIM(%s))
+                LOWER(
+                    TRIM(t.day)
+                )
+                =
+                LOWER(
+                    TRIM(%s)
+                )
 
             GROUP BY
                 t.subject_id,
@@ -1722,8 +1977,30 @@ def get_subjects_by_date(
                 first_period
 
         """, (
+
+            # --------------------------------------------------------
+            # 1. Subject department
+            # --------------------------------------------------------
+            subject_department,
+
+            # --------------------------------------------------------
+            # 2. Exact department priority
+            # --------------------------------------------------------
+            subject_department,
+
+            # --------------------------------------------------------
+            # 3. Timetable department
+            # --------------------------------------------------------
             department,
+
+            # --------------------------------------------------------
+            # 4. Semester
+            # --------------------------------------------------------
             semester,
+
+            # --------------------------------------------------------
+            # 5. Day
+            # --------------------------------------------------------
             weekday_short
         ))
 
@@ -1734,21 +2011,45 @@ def get_subjects_by_date(
             len(rows)
         )
 
+        # ============================================================
+        # BUILD API RESPONSE
+        # ============================================================
+
         result = []
 
         for r in rows:
+
+            # --------------------------------------------------------
+            # SUBJECT ID
+            #
+            # Keep this for attendance/database operations.
+            # --------------------------------------------------------
 
             subject_id = str(
                 r[0] or ""
             ).strip()
 
+            # --------------------------------------------------------
+            # FULL SUBJECT NAME
+            #
+            # This is what Flutter displays.
+            # --------------------------------------------------------
+
             subject_name = str(
                 r[1] or ""
             ).strip()
 
+            # --------------------------------------------------------
+            # SUBJECT TYPE
+            # --------------------------------------------------------
+
             subject_type = str(
                 r[2] or ""
             ).strip()
+
+            # --------------------------------------------------------
+            # SECTIONS
+            # --------------------------------------------------------
 
             sections = (
                 r[3].split(",")
@@ -1756,29 +2057,50 @@ def get_subjects_by_date(
                 else []
             )
 
+            # --------------------------------------------------------
+            # DEBUG
+            # --------------------------------------------------------
+
             print(
                 "📚 SUBJECT API → "
                 f"ID={subject_id} | "
                 f"NAME={subject_name} | "
-                f"TYPE={subject_type}"
+                f"TYPE={subject_type} | "
+                f"SUBJECT_DEPT={subject_department}"
             )
 
+            # --------------------------------------------------------
+            # API RESPONSE
+            # --------------------------------------------------------
+
             result.append({
-                "subject_id": subject_id,
-                "subject_name": subject_name,
-                "type": subject_type,
+
+                # Internal subject identifier
+                "subject_id":
+                    subject_id,
+
+                # FULL subject name
+                "subject_name":
+                    subject_name,
+
+                # Theory / Practical
+                "type":
+                    subject_type,
+
+                # Sections
                 "sections": [
                     s.strip()
                     for s in sections
                     if s.strip()
                 ]
+
             })
 
         return result
 
     finally:
-        release_db(conn)
 
+        release_db(conn)
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
 # ======================================================
