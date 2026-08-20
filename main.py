@@ -697,22 +697,57 @@ def startup():
         """)
 
         # ======================================================
-        # FACULTY SUBJECT MAP (FIXED PRIMARY KEY)
+        # FACULTY SUBJECT MAP
+        # CLOUD AUTHORITATIVE SCHEMA
         # ======================================================
 
-        # 🔥 TEMP FORCE RESET (ONLY FOR 1ST DEPLOY)
-        cur.execute("DROP TABLE IF EXISTS faculty_subject_map CASCADE")
-
         cur.execute("""
-        CREATE TABLE faculty_subject_map(
+        CREATE TABLE IF NOT EXISTS faculty_subject_map(
             faculty_id TEXT,
             subject_id TEXT,
             department TEXT,
             semester TEXT,
-            section TEXT,
+            section TEXT DEFAULT 'ALL',
+
+            subject_type TEXT,
+            assignment TEXT,
+            status TEXT DEFAULT 'ACTIVE',
+
             last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (faculty_id, subject_id, semester, department, section)
+
+            PRIMARY KEY (
+                faculty_id,
+                subject_id,
+                semester,
+                department,
+                section
+            )
         )
+        """)
+
+        # ======================================================
+        # FACULTY SUBJECT MAP - SAFE COLUMN MIGRATION
+        # ======================================================
+
+        cur.execute("""
+        ALTER TABLE faculty_subject_map
+        ADD COLUMN IF NOT EXISTS subject_type TEXT
+        """)
+
+        cur.execute("""
+        ALTER TABLE faculty_subject_map
+        ADD COLUMN IF NOT EXISTS assignment TEXT
+        """)
+
+        cur.execute("""
+        ALTER TABLE faculty_subject_map
+        ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'ACTIVE'
+        """)
+
+        cur.execute("""
+        ALTER TABLE faculty_subject_map
+        ADD COLUMN IF NOT EXISTS last_updated
+        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         """)
         # ======================================================
         # TIMETABLE
