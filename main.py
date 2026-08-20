@@ -3811,6 +3811,66 @@ def universal_sync_upload(
         "rows": len(records)
     }
 
+# ======================================================
+# FACULTY SUBJECT MAP - DEDICATED CLOUD SYNC
+# ======================================================
+
+@app.post("/sync/faculty_subject_map")
+def sync_faculty_subject_map(
+    records: list = Body(...)
+):
+    """
+    Dedicated Local → Cloud synchronization endpoint
+    for faculty_subject_map.
+
+    faculty_subject_map.assignment is mapping-level
+    data and must be written directly to PostgreSQL.
+    """
+
+    if not records:
+        return {
+            "status": "no_data",
+            "rows": 0
+        }
+
+    print("\n" + "=" * 80)
+    print("🌐 FACULTY SUBJECT MAP SYNC REQUEST")
+    print(f"📦 Records received: {len(records)}")
+
+    # --------------------------------------------------
+    # DEBUG THE EXACT ASSIGNMENT RECEIVED FROM LOCAL
+    # --------------------------------------------------
+
+    for r in records:
+
+        print(
+            "   FSM → "
+            f"Faculty={r.get('faculty_id')} | "
+            f"Subject={r.get('subject_id')} | "
+            f"Department={r.get('department')} | "
+            f"Semester={r.get('semester')} | "
+            f"Section={r.get('section')} | "
+            f"Assignment={r.get('assignment')}"
+        )
+
+    print("=" * 80)
+
+    # --------------------------------------------------
+    # USE THE SAME UNIVERSAL UPSERT ENGINE
+    # --------------------------------------------------
+
+    result = universal_sync_upload(
+        table_name="faculty_subject_map",
+        records=records
+    )
+
+    print(
+        "✅ FACULTY SUBJECT MAP CLOUD SYNC COMPLETED"
+    )
+
+    return result
+
+
 # ============================================================
 # ACTIVITY ATTENDANCE — DEDICATED CLOUD SYNC
 # ============================================================
