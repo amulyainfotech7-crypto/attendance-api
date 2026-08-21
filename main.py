@@ -2181,6 +2181,122 @@ def delete_cloud_row(table: str, row_id: str):
             )
 
         # --------------------------------------------------
+        # FACULTY SUBJECT MAP
+        # --------------------------------------------------
+        elif table == "faculty_subject_map":
+
+            import json
+
+            # faculty_subject_map does NOT have an "id"
+            # column in PostgreSQL.
+            #
+            # Its PRIMARY KEY is:
+            #
+            # faculty_id
+            # subject_id
+            # semester
+            # department
+            # section
+            #
+            # Therefore row_id must contain the complete
+            # composite key as JSON.
+
+            try:
+                key_data = json.loads(row_id)
+
+            except Exception as e:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid faculty_subject_map "
+                        f"DELETE key: {e}"
+                    )
+                )
+
+            faculty_id = str(
+                key_data.get("faculty_id", "")
+            ).strip()
+
+            subject_id = str(
+                key_data.get("subject_id", "")
+            ).strip()
+
+            semester = str(
+                key_data.get("semester", "")
+            ).strip()
+
+            department = str(
+                key_data.get("department", "")
+            ).strip()
+
+            section = str(
+                key_data.get("section", "")
+            ).strip()
+
+            if not (
+                faculty_id
+                and subject_id
+                and semester
+                and department
+                and section
+            ):
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Incomplete faculty_subject_map "
+                        "DELETE key. Required: "
+                        "faculty_id, subject_id, semester, "
+                        "department, section."
+                    )
+                )
+
+            print("\n" + "=" * 80)
+            print("🗑 FACULTY SUBJECT MAP CLOUD DELETE")
+            print(
+                f"   Faculty    : {faculty_id}"
+            )
+            print(
+                f"   Subject    : {subject_id}"
+            )
+            print(
+                f"   Department : {department}"
+            )
+            print(
+                f"   Semester   : {semester}"
+            )
+            print(
+                f"   Section    : {section}"
+            )
+            print("=" * 80)
+
+            cur.execute(
+                """
+                DELETE FROM faculty_subject_map
+                WHERE faculty_id = %s
+                  AND subject_id = %s
+                  AND semester = %s
+                  AND department = %s
+                  AND section = %s
+                """,
+                (
+                    faculty_id,
+                    subject_id,
+                    semester,
+                    department,
+                    section
+                )
+            )
+
+            deleted_rows = cur.rowcount
+
+            print(
+                f"🗑 FACULTY SUBJECT MAP "
+                f"ROWS DELETED: {deleted_rows}"
+            )
+
+        # --------------------------------------------------
         # GENERIC FALLBACK
         # --------------------------------------------------
         else:
@@ -2195,7 +2311,7 @@ def delete_cloud_row(table: str, row_id: str):
                 (row_id,)
             )
 
-        deleted_rows = cur.rowcount
+            deleted_rows = cur.rowcount
 
         conn.commit()
 
