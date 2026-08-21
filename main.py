@@ -749,6 +749,149 @@ def startup():
         ADD COLUMN IF NOT EXISTS last_updated
         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         """)
+
+        # ======================================================
+        # FACULTY SUBJECT MAP - POSTGRESQL ID REPAIR
+        # ======================================================
+        #
+        # IMPORTANT:
+        #   id is only a PostgreSQL-side identifier.
+        #
+        #   It is NOT used as the Local ↔ Cloud identity.
+        #
+        #   FSM logical identity remains:
+        #
+        #       faculty_id
+        #       subject_id
+        #       semester
+        #       department
+        #       section
+        #
+        # ======================================================
+
+        print(
+            "🔧 Checking faculty_subject_map PostgreSQL ID..."
+        )
+
+        # ------------------------------------------------------
+        # 1. Create PostgreSQL sequence
+        # ------------------------------------------------------
+
+        cur.execute("""
+            CREATE SEQUENCE IF NOT EXISTS
+            faculty_subject_map_id_seq
+        """)
+
+        # ------------------------------------------------------
+        # 2. Add ID column if old/new cloud table does not have it
+        # ------------------------------------------------------
+
+        cur.execute("""
+            ALTER TABLE faculty_subject_map
+            ADD COLUMN IF NOT EXISTS id BIGINT
+        """)
+
+        # ------------------------------------------------------
+        # 3. Give ID an automatic PostgreSQL value
+        # ------------------------------------------------------
+
+        cur.execute("""
+            ALTER TABLE faculty_subject_map
+            ALTER COLUMN id
+            SET DEFAULT nextval(
+                'faculty_subject_map_id_seq'
+            )
+        """)
+
+        # ------------------------------------------------------
+        # 4. Find current highest ID
+        # ------------------------------------------------------
+
+        cur.execute("""
+            SELECT COALESCE(MAX(id), 0)
+            FROM faculty_subject_map
+        """)
+
+        max_id_row = cur.fetchone()
+
+        max_id = (
+            int(max_id_row[0])
+            if max_id_row and max_id_row[0] is not None
+            else 0
+        )
+
+        print(
+            f"🔢 Current faculty_subject_map MAX(id): {max_id}"
+        )
+
+        # ------------------------------------------------------
+        # 5. Synchronize sequence
+        # ------------------------------------------------------
+
+        cur.execute("""
+            SELECT setval(
+                'faculty_subject_map_id_seq',
+                %s,
+                false
+            )
+        """, (
+            max_id + 1,
+        ))
+
+        # ------------------------------------------------------
+        # 6. Repair existing NULL IDs
+        # ------------------------------------------------------
+
+        cur.execute("""
+            UPDATE faculty_subject_map
+            SET id = nextval(
+                'faculty_subject_map_id_seq'
+            )
+            WHERE id IS NULL
+        """)
+
+        repaired_ids = cur.rowcount
+
+        print(
+            f"🔧 Repaired NULL faculty_subject_map IDs: "
+            f"{repaired_ids}"
+        )
+
+        # ------------------------------------------------------
+        # 7. ID must never be NULL again
+        # ------------------------------------------------------
+
+        cur.execute("""
+            ALTER TABLE faculty_subject_map
+            ALTER COLUMN id
+            SET NOT NULL
+        """)
+
+        # ------------------------------------------------------
+        # 8. Make PostgreSQL ID unique
+        # ------------------------------------------------------
+
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_faculty_subject_map_id_unique
+            ON faculty_subject_map(id)
+        """)
+
+        # ------------------------------------------------------
+        # 9. Make sequence owned by the ID column
+        # ------------------------------------------------------
+
+        cur.execute("""
+            ALTER SEQUENCE faculty_subject_map_id_seq
+            OWNED BY faculty_subject_map.id
+        """)
+
+        print(
+            "✅ faculty_subject_map PostgreSQL ID is ready"
+        )
+
+
+
         # ======================================================
         # TIMETABLE
         # ======================================================
@@ -3985,6 +4128,7 @@ def sync_faculty_subject_map(
     )
 
     return result
+
 
 
 # ============================================================
