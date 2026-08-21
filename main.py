@@ -755,17 +755,28 @@ def startup():
         # ======================================================
         #
         # IMPORTANT:
-        #   id is only a PostgreSQL-side identifier.
         #
-        #   It is NOT used as the Local ↔ Cloud identity.
+        # PostgreSQL "id" is ONLY a cloud-side surrogate ID.
         #
-        #   FSM logical identity remains:
+        # It is NOT the Local ↔ Cloud synchronization identity.
         #
-        #       faculty_id
-        #       subject_id
-        #       semester
-        #       department
-        #       section
+        # FSM logical identity remains:
+        #
+        #     faculty_id
+        #     subject_id
+        #     semester
+        #     department
+        #     section
+        #
+        # Local SQLite IDs must NEVER be copied into this ID.
+        #
+        # This migration safely repairs:
+        #
+        #     1. Missing id column
+        #     2. NULL IDs
+        #     3. Duplicate IDs
+        #     4. Sequence position
+        #     5. Future automatic IDs
         #
         # ======================================================
 
@@ -774,7 +785,7 @@ def startup():
         )
 
         # ------------------------------------------------------
-        # 1. Create PostgreSQL sequence
+        # 1. CREATE SEQUENCE
         # ------------------------------------------------------
 
         cur.execute("""
@@ -783,7 +794,7 @@ def startup():
         """)
 
         # ------------------------------------------------------
-        # 2. Add ID column if old/new cloud table does not have it
+        # 2. ADD ID COLUMN IF NECESSARY
         # ------------------------------------------------------
 
         cur.execute("""
@@ -792,19 +803,19 @@ def startup():
         """)
 
         # ------------------------------------------------------
-        # 3. Give ID an automatic PostgreSQL value
+        # 3. REMOVE UNIQUE INDEX TEMPORARILY
+        #
+        # This is important because an older deployment may
+        # already have a partially-created/old index.
         # ------------------------------------------------------
 
         cur.execute("""
-            ALTER TABLE faculty_subject_map
-            ALTER COLUMN id
-            SET DEFAULT nextval(
-                'faculty_subject_map_id_seq'
-            )
+            DROP INDEX IF EXISTS
+            idx_faculty_subject_map_id_unique
         """)
 
         # ------------------------------------------------------
-        # 4. Find current highest ID
+        # 4. FIND CURRENT MAXIMUM ID
         # ------------------------------------------------------
 
         cur.execute("""
@@ -816,7 +827,8 @@ def startup():
 
         max_id = (
             int(max_id_row[0])
-            if max_id_row and max_id_row[0] is not None
+            if max_id_row
+            and max_id_row[0] is not None
             else 0
         )
 
@@ -825,7 +837,14 @@ def startup():
         )
 
         # ------------------------------------------------------
-        # 5. Synchronize sequence
+        # 5. POSITION SEQUENCE
+        #
+        # If MAX(id) = 24004
+        #
+        # next generated ID will be:
+        #
+        #     24005
+        #
         # ------------------------------------------------------
 
         cur.execute("""
@@ -839,7 +858,7 @@ def startup():
         ))
 
         # ------------------------------------------------------
-        # 6. Repair existing NULL IDs
+        # 6. REPAIR NULL IDs
         # ------------------------------------------------------
 
         cur.execute("""
@@ -850,15 +869,155 @@ def startup():
             WHERE id IS NULL
         """)
 
-        repaired_ids = cur.rowcount
+        repaired_null_ids = cur.rowcount
 
         print(
-            f"🔧 Repaired NULL faculty_subject_map IDs: "
-            f"{repaired_ids}"
+            "🔧 Repaired NULL faculty_subject_map IDs:",
+            repaired_null_ids
         )
 
         # ------------------------------------------------------
-        # 7. ID must never be NULL again
+        # 7. REPAIR DUPLICATE IDs
+        #
+        # Example:
+        #
+        #     id = 81
+        #     id = 81
+        #     id = 81
+        #
+        # Keep the first row as 81.
+        #
+        # The other rows receive:
+        #
+        #     24005
+        #     24006
+        #
+        # We use PostgreSQL ctid ONLY for this migration to
+        # uniquely identify the duplicate physical rows.
+        # ------------------------------------------------------
+
+        cur.execute("""
+            WITH duplicate_rows AS (
+                SELECT
+                    ctid,
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY id
+                        ORDER BY ctid
+                    ) AS rn
+                FROM faculty_subject_map
+                WHERE id IS NOT NULL
+            ),
+            rows_to_repair AS (
+                SELECT ctid
+                FROM duplicate_rows
+                WHERE rn > 1
+            )
+            UPDATE faculty_subject_map AS f
+            SET id = nextval(
+                'faculty_subject_map_id_seq'
+            )
+            FROM rows_to_repair AS r
+            WHERE f.ctid = r.ctid
+        """)
+
+        repaired_duplicate_ids = cur.rowcount
+
+        print(
+            "🔧 Repaired duplicate faculty_subject_map IDs:",
+            repaired_duplicate_ids
+        )
+
+        # ------------------------------------------------------
+        # 8. RE-CHECK MAXIMUM ID
+        #
+        # Duplicate/NULL repair may have generated new IDs.
+        # Synchronize the sequence again so the next INSERT
+        # can never collide.
+        # ------------------------------------------------------
+
+        cur.execute("""
+            SELECT COALESCE(MAX(id), 0)
+            FROM faculty_subject_map
+        """)
+
+        max_id_row = cur.fetchone()
+
+        max_id = (
+            int(max_id_row[0])
+            if max_id_row
+            and max_id_row[0] is not None
+            else 0
+        )
+
+        print(
+            f"🔢 Final faculty_subject_map MAX(id): {max_id}"
+        )
+
+        # ------------------------------------------------------
+        # 9. SET SEQUENCE TO FINAL MAX + 1
+        # ------------------------------------------------------
+
+        cur.execute("""
+            SELECT setval(
+                'faculty_subject_map_id_seq',
+                %s,
+                false
+            )
+        """, (
+            max_id + 1,
+        ))
+
+        # ------------------------------------------------------
+        # 10. VERIFY NO NULL IDs REMAIN
+        # ------------------------------------------------------
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM faculty_subject_map
+            WHERE id IS NULL
+        """)
+
+        null_id_count = cur.fetchone()[0]
+
+        if null_id_count != 0:
+
+            raise RuntimeError(
+                "faculty_subject_map still contains "
+                f"{null_id_count} NULL ID(s)."
+            )
+
+        print(
+            "✅ No NULL faculty_subject_map IDs remain."
+        )
+
+        # ------------------------------------------------------
+        # 11. VERIFY NO DUPLICATE IDs REMAIN
+        # ------------------------------------------------------
+
+        cur.execute("""
+            SELECT id, COUNT(*)
+            FROM faculty_subject_map
+            GROUP BY id
+            HAVING COUNT(*) > 1
+            LIMIT 1
+        """)
+
+        duplicate_id_row = cur.fetchone()
+
+        if duplicate_id_row:
+
+            raise RuntimeError(
+                "faculty_subject_map still contains "
+                f"duplicate ID={duplicate_id_row[0]}."
+            )
+
+        print(
+            "✅ No duplicate faculty_subject_map IDs remain."
+        )
+
+        # ------------------------------------------------------
+        # 12. ID MUST NEVER BE NULL AGAIN
         # ------------------------------------------------------
 
         cur.execute("""
@@ -868,23 +1027,85 @@ def startup():
         """)
 
         # ------------------------------------------------------
-        # 8. Make PostgreSQL ID unique
+        # 13. FUTURE INSERTS AUTOMATICALLY GENERATE ID
         # ------------------------------------------------------
 
         cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS
+            ALTER TABLE faculty_subject_map
+            ALTER COLUMN id
+            SET DEFAULT nextval(
+                'faculty_subject_map_id_seq'
+            )
+        """)
+
+        # ------------------------------------------------------
+        # 14. CREATE UNIQUE INDEX
+        # ------------------------------------------------------
+
+        cur.execute("""
+            CREATE UNIQUE INDEX
             idx_faculty_subject_map_id_unique
             ON faculty_subject_map(id)
         """)
 
         # ------------------------------------------------------
-        # 9. Make sequence owned by the ID column
+        # 15. OWN SEQUENCE BY ID COLUMN
         # ------------------------------------------------------
 
         cur.execute("""
             ALTER SEQUENCE faculty_subject_map_id_seq
             OWNED BY faculty_subject_map.id
         """)
+
+        # ------------------------------------------------------
+        # 16. FINAL VERIFICATION
+        # ------------------------------------------------------
+
+        cur.execute("""
+            SELECT
+                COUNT(*) AS total_rows,
+                COUNT(id) AS rows_with_id,
+                COUNT(DISTINCT id) AS distinct_ids
+            FROM faculty_subject_map
+        """)
+
+        fsm_id_stats = cur.fetchone()
+
+        print(
+            "📊 faculty_subject_map ID verification:"
+        )
+
+        print(
+            f"   Total rows      : {fsm_id_stats[0]}"
+        )
+
+        print(
+            f"   Rows with ID    : {fsm_id_stats[1]}"
+        )
+
+        print(
+            f"   Distinct IDs    : {fsm_id_stats[2]}"
+        )
+
+        if (
+            fsm_id_stats[0] !=
+            fsm_id_stats[1]
+        ):
+
+            raise RuntimeError(
+                "faculty_subject_map ID verification failed: "
+                "some rows still have NULL IDs."
+            )
+
+        if (
+            fsm_id_stats[0] !=
+            fsm_id_stats[2]
+        ):
+
+            raise RuntimeError(
+                "faculty_subject_map ID verification failed: "
+                "duplicate IDs still exist."
+            )
 
         print(
             "✅ faculty_subject_map PostgreSQL ID is ready"
