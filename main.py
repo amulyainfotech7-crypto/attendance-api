@@ -1114,176 +1114,277 @@ def startup():
 
 
         # ======================================================
-        # TIMETABLE
-        # CLOUD SCHEMA — FINAL SAFE VERSION
+        # ☁️ CLOUD → DESKTOP TIMETABLE SYNC
+        # FINAL VERSION
+        # last_updated is TEXT in PostgreSQL
         # ======================================================
 
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS timetable_slots(
-                id SERIAL PRIMARY KEY,
-                department TEXT NOT NULL,
-                semester TEXT NOT NULL,
-                section TEXT NOT NULL,
-                day TEXT NOT NULL,
-                period_no INTEGER NOT NULL,
-                period_len INTEGER,
-                type TEXT,
-                subject_id TEXT,
-                faculty_id TEXT,
-                room TEXT,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                version INTEGER DEFAULT 1,
-                sync_pending INTEGER DEFAULT 0
-            )
-        """)
+        @app.get("/sync/timetable")
+        def get_timetable_sync(
+            last_sync: Optional[str] = Query(default=None)
+        ):
 
-        # ======================================================
-        # SAFE TIMETABLE COLUMN MIGRATION
-        # ======================================================
+            conn = connect_db()
+            cur = conn.cursor()
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS department TEXT
-        """)
+            try:
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS semester TEXT
-        """)
+                print("=" * 80)
+                print("🌐 TIMETABLE CLOUD → DESKTOP SYNC")
+                print("=" * 80)
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS section TEXT
-        """)
+                print(
+                    "last_sync:",
+                    last_sync
+                )
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS day TEXT
-        """)
+                # ==================================================
+                # VERIFY TABLE
+                # ==================================================
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS period_no INTEGER
-        """)
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                        AND table_name = 'timetable_slots'
+                    )
+                """)
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS period_len INTEGER
-        """)
+                if not cur.fetchone()[0]:
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS type TEXT
-        """)
+                    raise RuntimeError(
+                        "timetable_slots table does not exist"
+                    )
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS subject_id TEXT
-        """)
+                # ==================================================
+                # GET ACTUAL COLUMNS
+                # ==================================================
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS faculty_id TEXT
-        """)
+                cur.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                    AND table_name = 'timetable_slots'
+                    ORDER BY ordinal_position
+                """)
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS room TEXT
-        """)
+                columns = [
+                    row[0]
+                    for row in cur.fetchall()
+                ]
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS last_updated
-            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        """)
+                print(
+                    "📋 Cloud timetable columns:",
+                    columns
+                )
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS version
-            INTEGER DEFAULT 1
-        """)
+                # ==================================================
+                # REQUIRED COLUMNS
+                # ==================================================
 
-        cur.execute("""
-            ALTER TABLE timetable_slots
-            ADD COLUMN IF NOT EXISTS sync_pending
-            INTEGER DEFAULT 0
-        """)
+                required_columns = [
+                    "department",
+                    "semester",
+                    "section",
+                    "day",
+                    "period_no",
+                    "period_len",
+                    "type",
+                    "subject_id",
+                    "faculty_id",
+                    "room",
+                    "last_updated",
+                    "version",
+                ]
 
-        # ======================================================
-        # SAFE DEFAULT REPAIR
-        # ======================================================
+                missing = [
+                    column
+                    for column in required_columns
+                    if column not in columns
+                ]
 
-        cur.execute("""
-            UPDATE timetable_slots
-            SET version = 1
-            WHERE version IS NULL
-        """)
+                if missing:
 
-        cur.execute("""
-            UPDATE timetable_slots
-            SET last_updated = CURRENT_TIMESTAMP
-            WHERE last_updated IS NULL
-        """)
+                    raise RuntimeError(
+                        "Missing timetable columns: "
+                        + ", ".join(missing)
+                    )
 
-        cur.execute("""
-            UPDATE timetable_slots
-            SET sync_pending = 0
-            WHERE sync_pending IS NULL
-        """)
+                # ==================================================
+                # CLOUD → LOCAL QUERY
+                #
+                # IMPORTANT:
+                # last_updated is TEXT.
+                #
+                # Therefore we compare it as TEXT.
+                # ==================================================
 
-        # ======================================================
-        # VERIFY TIMETABLE SCHEMA
-        # ======================================================
+                if last_sync:
 
-        cur.execute("""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-            AND table_name = 'timetable_slots'
-            ORDER BY ordinal_position
-        """)
+                    print(
+                        "🔄 Incremental timetable sync"
+                    )
 
-        timetable_columns = [
-            row[0]
-            for row in cur.fetchall()
-        ]
+                    cur.execute("""
+                        SELECT
+                            department,
+                            semester,
+                            section,
+                            day,
+                            period_no,
+                            period_len,
+                            type,
+                            subject_id,
+                            faculty_id,
+                            room,
+                            last_updated,
+                            version
 
-        required_timetable_columns = [
-            "id",
-            "department",
-            "semester",
-            "section",
-            "day",
-            "period_no",
-            "period_len",
-            "type",
-            "subject_id",
-            "faculty_id",
-            "room",
-            "last_updated",
-            "version",
-            "sync_pending",
-        ]
+                        FROM public.timetable_slots
 
-        missing_timetable_columns = [
-            column
-            for column in required_timetable_columns
-            if column not in timetable_columns
-        ]
+                        WHERE last_updated > %s
 
-        if missing_timetable_columns:
+                        ORDER BY last_updated ASC
+                    """, (
+                        str(last_sync),
+                    ))
 
-            raise RuntimeError(
-                "❌ timetable_slots schema incomplete. "
-                f"Missing columns: {missing_timetable_columns}"
-            )
+                else:
 
-        print("✅ timetable_slots schema verified")
+                    print(
+                        "📥 Full timetable sync"
+                    )
 
-        print(
-            "   Columns:",
-            ", ".join(timetable_columns)
-        )
+                    cur.execute("""
+                        SELECT
+                            department,
+                            semester,
+                            section,
+                            day,
+                            period_no,
+                            period_len,
+                            type,
+                            subject_id,
+                            faculty_id,
+                            room,
+                            last_updated,
+                            version
+
+                        FROM public.timetable_slots
+
+                        ORDER BY last_updated ASC
+                    """)
+
+                rows = cur.fetchall()
+
+                print(
+                    f"🌐 Cloud timetable rows: {len(rows)}"
+                )
+
+                # ==================================================
+                # BUILD RESPONSE
+                # ==================================================
+
+                records = []
+
+                for row in rows:
+
+                    records.append({
+
+                        "department": row[0],
+
+                        "semester": row[1],
+
+                        "section": row[2],
+
+                        "day": row[3],
+
+                        "period_no": row[4],
+
+                        "period_len": row[5],
+
+                        "type": row[6],
+
+                        "subject_id": row[7],
+
+                        "faculty_id": row[8],
+
+                        "room": row[9],
+
+                        "last_updated": (
+                            str(row[10])
+                            if row[10] is not None
+                            else None
+                        ),
+
+                        "version": (
+                            row[11]
+                            if row[11] is not None
+                            else 1
+                        ),
+                    })
+
+                # ==================================================
+                # LATEST SYNC VALUE
+                # ==================================================
+
+                latest_sync = None
+
+                if rows:
+
+                    latest_value = rows[-1][10]
+
+                    if latest_value is not None:
+
+                        latest_sync = str(
+                            latest_value
+                        )
+
+                print(
+                    "🕒 Latest timetable last_updated:",
+                    latest_sync
+                )
+
+                print(
+                    f"📤 Sending {len(records)} timetable rows"
+                )
+
+                print("=" * 80)
+
+                return {
+                    "status": "success",
+                    "count": len(records),
+                    "latest_sync": latest_sync,
+                    "records": records
+                }
+
+            except Exception as e:
+
+                import traceback
+
+                print("=" * 80)
+                print(
+                    "❌ TIMETABLE SYNC FAILED"
+                )
+
+                print(
+                    "ERROR:",
+                    str(e)
+                )
+
+                traceback.print_exc()
+
+                print("=" * 80)
+
+                raise HTTPException(
+                    status_code=500,
+                    detail=str(e)
+                )
+
+            finally:
+
+                release_db(conn)
 
         # ======================================================
         # SEMESTER DATES
