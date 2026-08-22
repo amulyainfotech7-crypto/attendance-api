@@ -1836,79 +1836,227 @@ def sync_timetable(records: list = Body(...)):
 # 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL SAFE)
 # ======================================================
 
-@app.get("/sync/timetable")
-def get_timetable_sync(last_sync: Optional[str] = Query(default=None)):
+# ======================================================
+# ☁️ CLOUD → LOCAL TIMETABLE SYNC
+# ======================================================
 
-    conn = connect_db()
-    cur = conn.cursor()
+@app.get("/sync/timetable")
+def get_timetable_sync(
+    last_sync: Optional[str] = Query(default=None)
+):
+
+    conn = None
 
     try:
 
+        conn = connect_db()
+        cur = conn.cursor()
+
+        print("=" * 80)
+        print("🌐 /sync/timetable")
+        print("=" * 80)
+
+        # ==================================================
+        # IMPORTANT:
+        # timetable_slots.last_updated is TEXT
+        # ==================================================
+
         if last_sync:
-            try:
-                parsed_sync = datetime.fromisoformat(last_sync)
-            except Exception:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid 'last_sync' timestamp format."
-                )
+
+            print(
+                "🔄 Incremental timetable sync:",
+                last_sync
+            )
 
             cur.execute("""
-                SELECT department, semester, section, day,
-                       period_no, period_len, type,
-                       subject_id, faculty_id, room,
-                       last_updated, version
-                FROM timetable_slots
+                SELECT
+                    slot_id,
+                    sbrn,
+                    subject_id,
+                    semester,
+                    section,
+                    class_date,
+                    department,
+                    day,
+                    period_no,
+                    period_len,
+                    type,
+                    faculty_id,
+                    room,
+                    last_updated,
+                    version
+                FROM public.timetable_slots
                 WHERE last_updated > %s
-                ORDER BY last_updated ASC
-            """, (parsed_sync,))
+                ORDER BY last_updated ASC, slot_id ASC
+            """, (
+                str(last_sync),
+            ))
+
         else:
+
+            print(
+                "📥 Full timetable sync"
+            )
+
             cur.execute("""
-                SELECT department, semester, section, day,
-                       period_no, period_len, type,
-                       subject_id, faculty_id, room,
-                       last_updated, version
-                FROM timetable_slots
-                ORDER BY last_updated ASC
+                SELECT
+                    slot_id,
+                    sbrn,
+                    subject_id,
+                    semester,
+                    section,
+                    class_date,
+                    department,
+                    day,
+                    period_no,
+                    period_len,
+                    type,
+                    faculty_id,
+                    room,
+                    last_updated,
+                    version
+                FROM public.timetable_slots
+                ORDER BY last_updated ASC, slot_id ASC
             """)
 
         rows = cur.fetchall()
 
-    except Exception as e:
-        release_db(conn)
-        raise HTTPException(status_code=500, detail=str(e))
+        print(
+            "🌐 Cloud timetable rows:",
+            len(rows)
+        )
 
-    release_db(conn)
+        # ==================================================
+        # BUILD JSON RECORDS
+        # ==================================================
 
-    data = [
-        {
-            "department": r[0],
-            "semester": r[1],
-            "section": r[2],
-            "day": r[3],
-            "period_no": r[4],
-            "period_len": r[5],
-            "type": r[6],
-            "subject_id": r[7],
-            "faculty_id": r[8],
-            "room": r[9],
-            "last_updated": r[10].isoformat() if r[10] else None,
-            "version": r[11]
+        data = []
+
+        for r in rows:
+
+            data.append({
+
+                "slot_id": r[0],
+
+                "sbrn": r[1],
+
+                "subject_id": r[2],
+
+                "semester": r[3],
+
+                "section": r[4],
+
+                "class_date": (
+                    r[5].isoformat()
+                    if r[5] is not None
+                    and hasattr(r[5], "isoformat")
+                    else (
+                        str(r[5])
+                        if r[5] is not None
+                        else None
+                    )
+                ),
+
+                "department": r[6],
+
+                "day": r[7],
+
+                "period_no": r[8],
+
+                "period_len": r[9],
+
+                "type": r[10],
+
+                "faculty_id": r[11],
+
+                "room": r[12],
+
+                # ------------------------------------------
+                # last_updated is TEXT
+                # ------------------------------------------
+
+                "last_updated": (
+                    str(r[13])
+                    if r[13] is not None
+                    else None
+                ),
+
+                "version": (
+                    r[14]
+                    if r[14] is not None
+                    else 1
+                )
+            })
+
+        # ==================================================
+        # LATEST SYNC VALUE
+        # ==================================================
+
+        latest_sync = None
+
+        if rows:
+
+            latest_value = rows[-1][13]
+
+            if latest_value is not None:
+
+                latest_sync = str(
+                    latest_value
+                )
+
+        print(
+            "🕒 Latest timetable sync:",
+            latest_sync
+        )
+
+        print(
+            "📤 Returning:",
+            len(data),
+            "timetable records"
+        )
+
+        print("=" * 80)
+
+        return {
+            "status": "success",
+            "count": len(data),
+            "latest_sync": latest_sync,
+            "records": data
         }
-        for r in rows
-    ]
 
-    latest_sync = None
-    if rows:
-        latest_sync = rows[-1][10].isoformat()
+    except Exception as e:
 
-    return {
-        "status": "success",
-        "count": len(data),
-        "latest_sync": latest_sync,
-        "records": data
-    }
+        import traceback
 
+        print("=" * 80)
+        print("❌ /sync/timetable FAILED")
+        print(
+            "ERROR:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+        print("=" * 80)
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
+        if conn is not None:
+
+            try:
+                release_db(conn)
+
+            except Exception:
+
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 # ======================================================
 # GET TIMETABLE
 # ======================================================
