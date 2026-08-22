@@ -1113,178 +1113,115 @@ def startup():
 
 
 
-        # ======================================================
-        # ☁️ CLOUD → DESKTOP TIMETABLE SYNC
-        # FINAL VERSION
-        # last_updated is TEXT in PostgreSQL
-        # ======================================================
+        # ============================================================
+        # ☁️ CLOUD → LOCAL TIMETABLE
+        # DIAGNOSTIC VERSION
+        # ============================================================
 
         @app.get("/sync/timetable")
         def get_timetable_sync(
             last_sync: Optional[str] = Query(default=None)
         ):
 
-            conn = connect_db()
-            cur = conn.cursor()
+            conn = None
 
             try:
 
-                print("=" * 80)
-                print("🌐 TIMETABLE CLOUD → DESKTOP SYNC")
-                print("=" * 80)
+                print()
+                print("=" * 90)
+                print("🌐 /sync/timetable CALLED")
+                print("=" * 90)
 
-                print(
-                    "last_sync:",
-                    last_sync
-                )
+                print("last_sync =", last_sync)
 
-                # ==================================================
-                # VERIFY TABLE
-                # ==================================================
+                # ----------------------------------------------------
+                # DATABASE
+                # ----------------------------------------------------
+
+                conn = connect_db()
+                cur = conn.cursor()
+
+                print("✅ PostgreSQL connection OK")
+
+                # ----------------------------------------------------
+                # TABLE CHECK
+                # ----------------------------------------------------
 
                 cur.execute("""
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM information_schema.tables
-                        WHERE table_schema = 'public'
-                        AND table_name = 'timetable_slots'
-                    )
+                    SELECT COUNT(*)
+                    FROM public.timetable_slots
                 """)
 
-                if not cur.fetchone()[0]:
+                total_count = cur.fetchone()[0]
 
-                    raise RuntimeError(
-                        "timetable_slots table does not exist"
-                    )
+                print(
+                    "📊 PostgreSQL timetable_slots count =",
+                    total_count
+                )
 
-                # ==================================================
-                # GET ACTUAL COLUMNS
-                # ==================================================
+                # ----------------------------------------------------
+                # ACTUAL COLUMNS
+                # ----------------------------------------------------
 
                 cur.execute("""
-                    SELECT column_name
+                    SELECT
+                        column_name,
+                        data_type
                     FROM information_schema.columns
                     WHERE table_schema = 'public'
                     AND table_name = 'timetable_slots'
                     ORDER BY ordinal_position
                 """)
 
-                columns = [
-                    row[0]
-                    for row in cur.fetchall()
-                ]
+                schema_rows = cur.fetchall()
 
-                print(
-                    "📋 Cloud timetable columns:",
-                    columns
-                )
+                print("📋 PostgreSQL timetable_slots schema:")
 
-                # ==================================================
-                # REQUIRED COLUMNS
-                # ==================================================
-
-                required_columns = [
-                    "department",
-                    "semester",
-                    "section",
-                    "day",
-                    "period_no",
-                    "period_len",
-                    "type",
-                    "subject_id",
-                    "faculty_id",
-                    "room",
-                    "last_updated",
-                    "version",
-                ]
-
-                missing = [
-                    column
-                    for column in required_columns
-                    if column not in columns
-                ]
-
-                if missing:
-
-                    raise RuntimeError(
-                        "Missing timetable columns: "
-                        + ", ".join(missing)
-                    )
-
-                # ==================================================
-                # CLOUD → LOCAL QUERY
-                #
-                # IMPORTANT:
-                # last_updated is TEXT.
-                #
-                # Therefore we compare it as TEXT.
-                # ==================================================
-
-                if last_sync:
+                for column_name, data_type in schema_rows:
 
                     print(
-                        "🔄 Incremental timetable sync"
+                        f"   {column_name} : {data_type}"
                     )
 
-                    cur.execute("""
-                        SELECT
-                            department,
-                            semester,
-                            section,
-                            day,
-                            period_no,
-                            period_len,
-                            type,
-                            subject_id,
-                            faculty_id,
-                            room,
-                            last_updated,
-                            version
+                # ----------------------------------------------------
+                # SIMPLE QUERY FIRST
+                #
+                # Do NOT use last_sync yet.
+                # We first prove that PostgreSQL can read the table.
+                # ----------------------------------------------------
 
-                        FROM public.timetable_slots
-
-                        WHERE last_updated > %s
-
-                        ORDER BY last_updated ASC
-                    """, (
-                        str(last_sync),
-                    ))
-
-                else:
-
-                    print(
-                        "📥 Full timetable sync"
-                    )
-
-                    cur.execute("""
-                        SELECT
-                            department,
-                            semester,
-                            section,
-                            day,
-                            period_no,
-                            period_len,
-                            type,
-                            subject_id,
-                            faculty_id,
-                            room,
-                            last_updated,
-                            version
-
-                        FROM public.timetable_slots
-
-                        ORDER BY last_updated ASC
-                    """)
+                cur.execute("""
+                    SELECT
+                        department,
+                        semester,
+                        section,
+                        day,
+                        period_no,
+                        period_len,
+                        type,
+                        subject_id,
+                        faculty_id,
+                        room,
+                        last_updated,
+                        version
+                    FROM public.timetable_slots
+                    ORDER BY slot_id
+                """)
 
                 rows = cur.fetchall()
 
                 print(
-                    f"🌐 Cloud timetable rows: {len(rows)}"
+                    "✅ Timetable SELECT successful"
                 )
 
-                # ==================================================
-                # BUILD RESPONSE
-                # ==================================================
+                print(
+                    "🌐 Rows returned =",
+                    len(rows)
+                )
+
+                # ----------------------------------------------------
+                # BUILD RECORDS
+                # ----------------------------------------------------
 
                 records = []
 
@@ -1322,40 +1259,43 @@ def startup():
                             row[11]
                             if row[11] is not None
                             else 1
-                        ),
+                        )
                     })
 
-                # ==================================================
-                # LATEST SYNC VALUE
-                # ==================================================
+                # ----------------------------------------------------
+                # SAMPLE
+                # ----------------------------------------------------
 
-                latest_sync = None
+                if records:
 
-                if rows:
+                    print(
+                        "🔍 FIRST TIMETABLE RECORD:"
+                    )
 
-                    latest_value = rows[-1][10]
+                    print(
+                        records[0]
+                    )
 
-                    if latest_value is not None:
+                else:
 
-                        latest_sync = str(
-                            latest_value
-                        )
+                    print(
+                        "⚠️ PostgreSQL timetable_slots is EMPTY"
+                    )
 
+                print("=" * 90)
                 print(
-                    "🕒 Latest timetable last_updated:",
-                    latest_sync
+                    f"✅ Returning {len(records)} timetable rows"
                 )
-
-                print(
-                    f"📤 Sending {len(records)} timetable rows"
-                )
-
-                print("=" * 80)
+                print("=" * 90)
 
                 return {
                     "status": "success",
                     "count": len(records),
-                    "latest_sync": latest_sync,
+                    "latest_sync": (
+                        records[-1]["last_updated"]
+                        if records
+                        else None
+                    ),
                     "records": records
                 }
 
@@ -1363,20 +1303,28 @@ def startup():
 
                 import traceback
 
-                print("=" * 80)
+                print()
+                print("=" * 90)
+                print("❌ /sync/timetable FAILED")
+                print("=" * 90)
+
                 print(
-                    "❌ TIMETABLE SYNC FAILED"
+                    "EXCEPTION TYPE:",
+                    type(e).__name__
                 )
 
                 print(
-                    "ERROR:",
-                    str(e)
+                    "EXCEPTION:",
+                    repr(e)
                 )
 
                 traceback.print_exc()
 
-                print("=" * 80)
+                print("=" * 90)
 
+                # IMPORTANT:
+                # Return the actual error temporarily so we can
+                # identify the problem.
                 raise HTTPException(
                     status_code=500,
                     detail=str(e)
@@ -1384,7 +1332,17 @@ def startup():
 
             finally:
 
-                release_db(conn)
+                if conn is not None:
+
+                    try:
+                        release_db(conn)
+
+                    except Exception:
+
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
 
         # ======================================================
         # SEMESTER DATES
