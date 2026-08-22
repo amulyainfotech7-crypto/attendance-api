@@ -1113,236 +1113,28 @@ def startup():
 
 
 
-        # ============================================================
-        # ☁️ CLOUD → LOCAL TIMETABLE
-        # DIAGNOSTIC VERSION
-        # ============================================================
+        # ======================================================
+        # TIMETABLE
+        # ======================================================
 
-        @app.get("/sync/timetable")
-        def get_timetable_sync(
-            last_sync: Optional[str] = Query(default=None)
-        ):
-
-            conn = None
-
-            try:
-
-                print()
-                print("=" * 90)
-                print("🌐 /sync/timetable CALLED")
-                print("=" * 90)
-
-                print("last_sync =", last_sync)
-
-                # ----------------------------------------------------
-                # DATABASE
-                # ----------------------------------------------------
-
-                conn = connect_db()
-                cur = conn.cursor()
-
-                print("✅ PostgreSQL connection OK")
-
-                # ----------------------------------------------------
-                # TABLE CHECK
-                # ----------------------------------------------------
-
-                cur.execute("""
-                    SELECT COUNT(*)
-                    FROM public.timetable_slots
-                """)
-
-                total_count = cur.fetchone()[0]
-
-                print(
-                    "📊 PostgreSQL timetable_slots count =",
-                    total_count
-                )
-
-                # ----------------------------------------------------
-                # ACTUAL COLUMNS
-                # ----------------------------------------------------
-
-                cur.execute("""
-                    SELECT
-                        column_name,
-                        data_type
-                    FROM information_schema.columns
-                    WHERE table_schema = 'public'
-                    AND table_name = 'timetable_slots'
-                    ORDER BY ordinal_position
-                """)
-
-                schema_rows = cur.fetchall()
-
-                print("📋 PostgreSQL timetable_slots schema:")
-
-                for column_name, data_type in schema_rows:
-
-                    print(
-                        f"   {column_name} : {data_type}"
-                    )
-
-                # ----------------------------------------------------
-                # SIMPLE QUERY FIRST
-                #
-                # Do NOT use last_sync yet.
-                # We first prove that PostgreSQL can read the table.
-                # ----------------------------------------------------
-
-                cur.execute("""
-                    SELECT
-                        department,
-                        semester,
-                        section,
-                        day,
-                        period_no,
-                        period_len,
-                        type,
-                        subject_id,
-                        faculty_id,
-                        room,
-                        last_updated,
-                        version
-                    FROM public.timetable_slots
-                    ORDER BY slot_id
-                """)
-
-                rows = cur.fetchall()
-
-                print(
-                    "✅ Timetable SELECT successful"
-                )
-
-                print(
-                    "🌐 Rows returned =",
-                    len(rows)
-                )
-
-                # ----------------------------------------------------
-                # BUILD RECORDS
-                # ----------------------------------------------------
-
-                records = []
-
-                for row in rows:
-
-                    records.append({
-
-                        "department": row[0],
-
-                        "semester": row[1],
-
-                        "section": row[2],
-
-                        "day": row[3],
-
-                        "period_no": row[4],
-
-                        "period_len": row[5],
-
-                        "type": row[6],
-
-                        "subject_id": row[7],
-
-                        "faculty_id": row[8],
-
-                        "room": row[9],
-
-                        "last_updated": (
-                            str(row[10])
-                            if row[10] is not None
-                            else None
-                        ),
-
-                        "version": (
-                            row[11]
-                            if row[11] is not None
-                            else 1
-                        )
-                    })
-
-                # ----------------------------------------------------
-                # SAMPLE
-                # ----------------------------------------------------
-
-                if records:
-
-                    print(
-                        "🔍 FIRST TIMETABLE RECORD:"
-                    )
-
-                    print(
-                        records[0]
-                    )
-
-                else:
-
-                    print(
-                        "⚠️ PostgreSQL timetable_slots is EMPTY"
-                    )
-
-                print("=" * 90)
-                print(
-                    f"✅ Returning {len(records)} timetable rows"
-                )
-                print("=" * 90)
-
-                return {
-                    "status": "success",
-                    "count": len(records),
-                    "latest_sync": (
-                        records[-1]["last_updated"]
-                        if records
-                        else None
-                    ),
-                    "records": records
-                }
-
-            except Exception as e:
-
-                import traceback
-
-                print()
-                print("=" * 90)
-                print("❌ /sync/timetable FAILED")
-                print("=" * 90)
-
-                print(
-                    "EXCEPTION TYPE:",
-                    type(e).__name__
-                )
-
-                print(
-                    "EXCEPTION:",
-                    repr(e)
-                )
-
-                traceback.print_exc()
-
-                print("=" * 90)
-
-                # IMPORTANT:
-                # Return the actual error temporarily so we can
-                # identify the problem.
-                raise HTTPException(
-                    status_code=500,
-                    detail=str(e)
-                )
-
-            finally:
-
-                if conn is not None:
-
-                    try:
-                        release_db(conn)
-
-                    except Exception:
-
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS timetable_slots(
+                id SERIAL PRIMARY KEY,
+                department TEXT NOT NULL,
+                semester TEXT NOT NULL,
+                section TEXT NOT NULL,
+                day TEXT NOT NULL,
+                period_no INTEGER NOT NULL,
+                period_len INTEGER,
+                type TEXT,
+                subject_id TEXT,
+                faculty_id TEXT,
+                room TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                version INTEGER DEFAULT 1,
+                sync_pending INTEGER DEFAULT 0
+            )
+        """)
 
         # ======================================================
         # SEMESTER DATES
