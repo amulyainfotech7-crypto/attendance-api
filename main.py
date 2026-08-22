@@ -1115,6 +1115,7 @@ def startup():
 
         # ======================================================
         # TIMETABLE
+        # CLOUD SCHEMA — FINAL SAFE VERSION
         # ======================================================
 
         cur.execute("""
@@ -1135,6 +1136,154 @@ def startup():
                 sync_pending INTEGER DEFAULT 0
             )
         """)
+
+        # ======================================================
+        # SAFE TIMETABLE COLUMN MIGRATION
+        # ======================================================
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS department TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS semester TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS section TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS day TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS period_no INTEGER
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS period_len INTEGER
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS type TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS subject_id TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS faculty_id TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS room TEXT
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS last_updated
+            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS version
+            INTEGER DEFAULT 1
+        """)
+
+        cur.execute("""
+            ALTER TABLE timetable_slots
+            ADD COLUMN IF NOT EXISTS sync_pending
+            INTEGER DEFAULT 0
+        """)
+
+        # ======================================================
+        # SAFE DEFAULT REPAIR
+        # ======================================================
+
+        cur.execute("""
+            UPDATE timetable_slots
+            SET version = 1
+            WHERE version IS NULL
+        """)
+
+        cur.execute("""
+            UPDATE timetable_slots
+            SET last_updated = CURRENT_TIMESTAMP
+            WHERE last_updated IS NULL
+        """)
+
+        cur.execute("""
+            UPDATE timetable_slots
+            SET sync_pending = 0
+            WHERE sync_pending IS NULL
+        """)
+
+        # ======================================================
+        # VERIFY TIMETABLE SCHEMA
+        # ======================================================
+
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+            AND table_name = 'timetable_slots'
+            ORDER BY ordinal_position
+        """)
+
+        timetable_columns = [
+            row[0]
+            for row in cur.fetchall()
+        ]
+
+        required_timetable_columns = [
+            "id",
+            "department",
+            "semester",
+            "section",
+            "day",
+            "period_no",
+            "period_len",
+            "type",
+            "subject_id",
+            "faculty_id",
+            "room",
+            "last_updated",
+            "version",
+            "sync_pending",
+        ]
+
+        missing_timetable_columns = [
+            column
+            for column in required_timetable_columns
+            if column not in timetable_columns
+        ]
+
+        if missing_timetable_columns:
+
+            raise RuntimeError(
+                "❌ timetable_slots schema incomplete. "
+                f"Missing columns: {missing_timetable_columns}"
+            )
+
+        print("✅ timetable_slots schema verified")
+
+        print(
+            "   Columns:",
+            ", ".join(timetable_columns)
+        )
 
         # ======================================================
         # SEMESTER DATES
