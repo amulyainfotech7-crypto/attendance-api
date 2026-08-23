@@ -5610,50 +5610,182 @@ def sync_results_semester(records: list = Body(...)):
                 pass
 # ======================================================
 # 🔥 SYNC ATTENDANCE (DESKTOP → CLOUD)
+# FINAL: SAME LOGICAL ROW UPDATE
 # ======================================================
 
 @app.post("/sync/attendance")
 def sync_attendance_to_cloud(records: list = Body(...)):
 
     if not records:
-        return {"status": "no_data"}
+        return {
+            "status": "no_data",
+            "rows_processed": 0
+        }
 
     conn = connect_db()
     cur = conn.cursor()
 
     try:
-        execute_batch(cur, """
+
+        normalized_records = []
+
+        for rec in records:
+
+            if not isinstance(rec, dict):
+                continue
+
+            sbrn = str(
+                rec.get("sbrn") or ""
+            ).strip()
+
+            subject_id = str(
+                rec.get("subject_id")
+                or rec.get("subject")
+                or ""
+            ).strip().upper()
+
+            subject = str(
+                rec.get("subject")
+                or subject_id
+                or ""
+            ).strip()
+
+            semester = str(
+                rec.get("semester") or ""
+            ).strip()
+
+            class_date = str(
+                rec.get("class_date")
+                or rec.get("date")
+                or ""
+            ).strip()
+
+            # 🔥 CRITICAL FIX
+            # all / All / ALL → ALL
+            section = str(
+                rec.get("section") or "ALL"
+            ).strip().upper()
+
+            if not (
+                sbrn
+                and subject_id
+                and semester
+                and class_date
+            ):
+                continue
+
+            attended = 1 if rec.get("attended") else 0
+
+            last_updated = (
+                rec.get("last_updated")
+                or datetime.utcnow()
+            )
+
+            normalized_records.append({
+                "sbrn": sbrn,
+                "subject_id": subject_id,
+                "subject": subject,
+                "semester": semester,
+                "section": section,
+                "class_date": class_date,
+                "attended": attended,
+                "last_updated": last_updated,
+            })
+
+        if not normalized_records:
+            return {
+                "status": "no_valid_records",
+                "rows_processed": 0
+            }
+
+        # ==================================================
+        # 🔥 UPSERT — SAME CLOUD ROW
+        # ==================================================
+
+        execute_batch(
+            cur,
+            """
             INSERT INTO attendance_daily
-            (sbrn, subject_id, subject, semester, section, class_date, attended, last_updated)
-            VALUES (%(sbrn)s, %(subject_id)s, %(subject)s,
-                    %(semester)s, %(section)s,
-                    %(class_date)s, %(attended)s,
-                    %(last_updated)s)
-            ON CONFLICT (sbrn, subject_id, semester, section, class_date)
+            (
+                sbrn,
+                subject_id,
+                subject,
+                semester,
+                section,
+                class_date,
+                attended,
+                last_updated
+            )
+            VALUES
+            (
+                %(sbrn)s,
+                %(subject_id)s,
+                %(subject)s,
+                %(semester)s,
+                %(section)s,
+                %(class_date)s,
+                %(attended)s,
+                %(last_updated)s
+            )
+
+            ON CONFLICT
+            (
+                sbrn,
+                subject_id,
+                semester,
+                section,
+                class_date
+            )
+
             DO UPDATE SET
+
+                subject = EXCLUDED.subject,
+
                 attended = EXCLUDED.attended,
+
                 last_updated = EXCLUDED.last_updated
-            WHERE attendance_daily.last_updated < EXCLUDED.last_updated;
-        """, records)
+
+            WHERE
+                attendance_daily.last_updated IS NULL
+                OR attendance_daily.last_updated
+                   < EXCLUDED.last_updated
+            """,
+            normalized_records
+        )
 
         conn.commit()
 
+        # ==================================================
+        # REALTIME UPDATE
+        # ==================================================
+
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(broadcast_event("attendance_daily"))
+
+            loop.create_task(
+                broadcast_event("attendance_daily")
+            )
+
         except RuntimeError:
             pass
 
+        return {
+            "status": "success",
+            "rows_processed": len(normalized_records)
+        }
 
     except Exception as e:
+
         conn.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
         release_db(conn)
-        raise HTTPException(status_code=500, detail=str(e))
-
-    release_db(conn)
-
-    return {"status": "success", "rows_processed": len(records)}
-
 
 
 # ======================================================
