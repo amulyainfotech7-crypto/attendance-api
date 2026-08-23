@@ -5608,8 +5608,9 @@ def sync_results_semester(records: list = Body(...)):
                 release_db(conn)
             except Exception:
                 pass
+
 # ======================================================
-# 🔥 SYNC ATTENDANCE (DESKTOP → CLOUD)
+# 🔥 SYNC ATTENDANCE (DESKTOP / FLUTTER → CLOUD)
 # FINAL: SAME LOGICAL ROW UPDATE
 # ======================================================
 
@@ -5634,6 +5635,10 @@ def sync_attendance_to_cloud(records: list = Body(...)):
             if not isinstance(rec, dict):
                 continue
 
+            # ==================================================
+            # BASIC FIELDS
+            # ==================================================
+
             sbrn = str(
                 rec.get("sbrn") or ""
             ).strip()
@@ -5648,7 +5653,7 @@ def sync_attendance_to_cloud(records: list = Body(...)):
                 rec.get("subject")
                 or subject_id
                 or ""
-            ).strip()
+            ).strip().upper()
 
             semester = str(
                 rec.get("semester") or ""
@@ -5660,11 +5665,22 @@ def sync_attendance_to_cloud(records: list = Body(...)):
                 or ""
             ).strip()
 
-            # 🔥 CRITICAL FIX
-            # all / All / ALL → ALL
+            # ==================================================
+            # 🔥 CRITICAL SECTION NORMALIZATION
+            #
+            # all / All / ALL / aLl → ALL
+            # ==================================================
+
             section = str(
                 rec.get("section") or "ALL"
             ).strip().upper()
+
+            if not section:
+                section = "ALL"
+
+            # ==================================================
+            # REQUIRED KEY VALIDATION
+            # ==================================================
 
             if not (
                 sbrn
@@ -5674,32 +5690,85 @@ def sync_attendance_to_cloud(records: list = Body(...)):
             ):
                 continue
 
-            attended = 1 if rec.get("attended") else 0
+            # ==================================================
+            # 🔥 SAFE ATTENDED NORMALIZATION
+            # ==================================================
+
+            raw_attended = rec.get("attended", 0)
+
+            if isinstance(raw_attended, str):
+
+                attended = (
+                    1
+                    if raw_attended.strip().upper()
+                    in (
+                        "1",
+                        "TRUE",
+                        "P",
+                        "PRESENT"
+                    )
+                    else 0
+                )
+
+            else:
+
+                attended = (
+                    1
+                    if raw_attended
+                    else 0
+                )
+
+            # ==================================================
+            # TIMESTAMP
+            # ==================================================
 
             last_updated = (
                 rec.get("last_updated")
                 or datetime.utcnow()
             )
 
+            # ==================================================
+            # NORMALIZED RECORD
+            # ==================================================
+
             normalized_records.append({
+
                 "sbrn": sbrn,
+
                 "subject_id": subject_id,
+
                 "subject": subject,
+
                 "semester": semester,
+
                 "section": section,
+
                 "class_date": class_date,
+
                 "attended": attended,
+
                 "last_updated": last_updated,
             })
 
+        # ==================================================
+        # NO VALID RECORDS
+        # ==================================================
+
         if not normalized_records:
+
             return {
                 "status": "no_valid_records",
                 "rows_processed": 0
             }
 
         # ==================================================
-        # 🔥 UPSERT — SAME CLOUD ROW
+        # 🔥 TRUE UPSERT
+        #
+        # SAME:
+        # SBRN + SUBJECT + SEMESTER + SECTION + DATE
+        #
+        # → UPDATE existing row
+        # → INSERT only if row doesn't exist
         # ==================================================
 
         execute_batch(
@@ -5739,16 +5808,22 @@ def sync_attendance_to_cloud(records: list = Body(...)):
 
             DO UPDATE SET
 
-                subject = EXCLUDED.subject,
+                subject =
+                    EXCLUDED.subject,
 
-                attended = EXCLUDED.attended,
+                attended =
+                    EXCLUDED.attended,
 
-                last_updated = EXCLUDED.last_updated
+                last_updated =
+                    EXCLUDED.last_updated
 
             WHERE
                 attendance_daily.last_updated IS NULL
-                OR attendance_daily.last_updated
-                   < EXCLUDED.last_updated
+
+                OR
+
+                attendance_daily.last_updated
+                < EXCLUDED.last_updated
             """,
             normalized_records
         )
@@ -5756,14 +5831,17 @@ def sync_attendance_to_cloud(records: list = Body(...)):
         conn.commit()
 
         # ==================================================
-        # REALTIME UPDATE
+        # 🔔 REALTIME UPDATE
         # ==================================================
 
         try:
+
             loop = asyncio.get_running_loop()
 
             loop.create_task(
-                broadcast_event("attendance_daily")
+                broadcast_event(
+                    "attendance_daily"
+                )
             )
 
         except RuntimeError:
@@ -5771,7 +5849,9 @@ def sync_attendance_to_cloud(records: list = Body(...)):
 
         return {
             "status": "success",
-            "rows_processed": len(normalized_records)
+            "rows_processed": len(
+                normalized_records
+            )
         }
 
     except Exception as e:
