@@ -1162,7 +1162,7 @@ def startup():
         """)
 
         # ======================================================
-        # ATTENDANCE
+        # ATTENDANCE DAILY
         # ======================================================
 
         cur.execute("""
@@ -1174,9 +1174,31 @@ def startup():
                 section TEXT NOT NULL,
                 class_date DATE NOT NULL,
                 attended INTEGER NOT NULL,
+                periods INTEGER NOT NULL DEFAULT 0,
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (sbrn, subject_id, semester, section, class_date)
+                PRIMARY KEY (
+                    sbrn,
+                    subject_id,
+                    semester,
+                    section,
+                    class_date
+                )
             );
+        """)
+
+        # ------------------------------------------------------
+        # SAFE MIGRATION FOR EXISTING CLOUD DATABASE
+        # ------------------------------------------------------
+
+        cur.execute("""
+            ALTER TABLE attendance_daily
+            ADD COLUMN IF NOT EXISTS periods INTEGER DEFAULT 0
+        """)
+
+        cur.execute("""
+            UPDATE attendance_daily
+            SET periods = 0
+            WHERE periods IS NULL
         """)
 
         # ======================================================
@@ -5612,6 +5634,12 @@ def sync_results_semester(records: list = Body(...)):
 # ======================================================
 # 🔥 SYNC ATTENDANCE (DESKTOP / FLUTTER → CLOUD)
 # FINAL: SAME LOGICAL ROW UPDATE
+#
+# ✔ attended preserved
+# ✔ periods preserved
+# ✔ section A/B preserved
+# ✔ theory section ALL
+# ✔ newer timestamp wins
 # ======================================================
 
 @app.post("/sync/attendance")
@@ -5666,9 +5694,10 @@ def sync_attendance_to_cloud(records: list = Body(...)):
             ).strip()
 
             # ==================================================
-            # 🔥 CRITICAL SECTION NORMALIZATION
+            # 🔥 SECTION NORMALIZATION
             #
-            # all / All / ALL / aLl → ALL
+            # THEORY     → ALL
+            # PRACTICAL  → A / B
             # ==================================================
 
             section = str(
@@ -5676,6 +5705,17 @@ def sync_attendance_to_cloud(records: list = Body(...)):
             ).strip().upper()
 
             if not section:
+                section = "ALL"
+
+            # Practical sections must remain A/B
+            if subject_id.endswith("_P"):
+
+                if section not in ("A", "B"):
+                    section = "ALL"
+
+            else:
+
+                # Theory attendance is always ALL
                 section = "ALL"
 
             # ==================================================
@@ -5694,7 +5734,10 @@ def sync_attendance_to_cloud(records: list = Body(...)):
             # 🔥 SAFE ATTENDED NORMALIZATION
             # ==================================================
 
-            raw_attended = rec.get("attended", 0)
+            raw_attended = rec.get(
+                "attended",
+                0
+            )
 
             if isinstance(raw_attended, str):
 
@@ -5717,6 +5760,35 @@ def sync_attendance_to_cloud(records: list = Body(...)):
                     if raw_attended
                     else 0
                 )
+
+            # ==================================================
+            # 🔥 PERIODS
+            #
+            # 1-period class → 1
+            # 2-period class → 2
+            #
+            # IMPORTANT:
+            # Do NOT calculate it here.
+            # It must come from desktop timetable logic.
+            # ==================================================
+
+            raw_periods = rec.get(
+                "periods",
+                0
+            )
+
+            try:
+
+                periods = int(
+                    raw_periods or 0
+                )
+
+            except (TypeError, ValueError):
+
+                periods = 0
+
+            if periods < 0:
+                periods = 0
 
             # ==================================================
             # TIMESTAMP
@@ -5747,6 +5819,8 @@ def sync_attendance_to_cloud(records: list = Body(...)):
 
                 "attended": attended,
 
+                "periods": periods,
+
                 "last_updated": last_updated,
             })
 
@@ -5768,7 +5842,7 @@ def sync_attendance_to_cloud(records: list = Body(...)):
         # SBRN + SUBJECT + SEMESTER + SECTION + DATE
         #
         # → UPDATE existing row
-        # → INSERT only if row doesn't exist
+        # → INSERT if row doesn't exist
         # ==================================================
 
         execute_batch(
@@ -5783,6 +5857,7 @@ def sync_attendance_to_cloud(records: list = Body(...)):
                 section,
                 class_date,
                 attended,
+                periods,
                 last_updated
             )
             VALUES
@@ -5794,6 +5869,7 @@ def sync_attendance_to_cloud(records: list = Body(...)):
                 %(section)s,
                 %(class_date)s,
                 %(attended)s,
+                %(periods)s,
                 %(last_updated)s
             )
 
@@ -5813,6 +5889,9 @@ def sync_attendance_to_cloud(records: list = Body(...)):
 
                 attended =
                     EXCLUDED.attended,
+
+                periods =
+                    EXCLUDED.periods,
 
                 last_updated =
                     EXCLUDED.last_updated
@@ -5866,7 +5945,6 @@ def sync_attendance_to_cloud(records: list = Body(...)):
     finally:
 
         release_db(conn)
-
 
 # ======================================================
 # 🔥 INCREMENTAL ATTENDANCE SYNC (DESKTOP-ALIGNED SAFE)
