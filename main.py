@@ -2508,123 +2508,75 @@ def get_subjects_by_date(
 # ======================================================
 
 @app.get("/students")
-def get_students(department: str, semester: str, section: str):
+def get_students(
+    department: str,
+    semester: str,
+    section: str
+):
+    """
+    Return students for the selected department, semester and section.
+
+    THEORY:
+        section = "all"
+        → return all active students for the department + semester.
+
+    PRACTICAL:
+        section = "A" / "B" / etc.
+        → return only students belonging to that section.
+
+    Manually detained/locked students are excluded.
+    """
+
+    # ======================================================
+    # NORMALIZE INPUT
+    # ======================================================
+
+    department = str(
+        department or ""
+    ).strip()
+
+    semester = str(
+        semester or ""
+    ).strip()
+
+    section = str(
+        section or ""
+    ).strip()
+
+    if not department:
+        raise HTTPException(
+            status_code=400,
+            detail="Department is required"
+        )
+
+    if not semester:
+        raise HTTPException(
+            status_code=400,
+            detail="Semester is required"
+        )
+
+    if not section:
+        raise HTTPException(
+            status_code=400,
+            detail="Section is required"
+        )
+
+    # ======================================================
+    # DATABASE
+    # ======================================================
 
     conn = connect_db()
     cur = conn.cursor()
 
-
-    print("=" * 80)
-    print("🔎 STUDENTS API DIAGNOSTIC")
-    print(f"Requested department = [{department}]")
-    print(f"Requested semester   = [{semester}]")
-    print(f"Requested section    = [{section}]")
-
-    # ------------------------------------------------------
-    # 1. Check whether ANY students exist for this semester
-    # ------------------------------------------------------
-    cur.execute("""
-        SELECT
-            department,
-            semester,
-            section,
-            COUNT(*)
-        FROM students
-        WHERE LOWER(TRIM(COALESCE(semester,''))) =
-            LOWER(TRIM(%s))
-        GROUP BY department, semester, section
-        ORDER BY department, section
-    """, (semester,))
-
-    debug_rows = cur.fetchall()
-
-    print("📊 STUDENTS FOUND FOR REQUESTED SEMESTER:")
-
-    for row in debug_rows:
-        print(
-            f"   DEPT=[{row[0]}] | "
-            f"SEM=[{row[1]}] | "
-            f"SECTION=[{row[2]}] | "
-            f"COUNT={row[3]}"
-        )
-
-    # ------------------------------------------------------
-    # 2. Check exact requested department
-    # ------------------------------------------------------
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM students
-        WHERE LOWER(TRIM(COALESCE(department,''))) =
-            LOWER(TRIM(%s))
-        AND LOWER(TRIM(COALESCE(semester,''))) =
-            LOWER(TRIM(%s))
-    """, (department, semester))
-
-    exact_count = cur.fetchone()[0]
-
-    print(
-        f"🎯 EXACT MATCH COUNT = {exact_count}"
-    )
-
-    # ------------------------------------------------------
-    # 3. Check active students for exact combination
-    # ------------------------------------------------------
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM students
-        WHERE LOWER(TRIM(COALESCE(department,''))) =
-            LOWER(TRIM(%s))
-        AND LOWER(TRIM(COALESCE(semester,''))) =
-            LOWER(TRIM(%s))
-        AND COALESCE(status_locked,0) = 0
-        AND UPPER(COALESCE(academic_status,'ACTIVE')) = 'ACTIVE'
-    """, (department, semester))
-
-    active_count = cur.fetchone()[0]
-
-    print(
-        f"🟢 ACTIVE EXACT MATCH COUNT = {active_count}"
-    )
-
-    print("=" * 80)
-
-
-    # ======================================================
-    # 🔎 CHECK ALL STUDENTS IN CLOUD DATABASE
-    # ======================================================
-
-    cur.execute("""
-        SELECT
-            department,
-            semester,
-            COUNT(*)
-        FROM students
-        GROUP BY department, semester
-        ORDER BY department, semester
-    """)
-
-    all_student_rows = cur.fetchall()
-
-    print("📋 ALL STUDENTS CURRENTLY IN CLOUD:")
-
-    for row in all_student_rows:
-        print(
-            f"   DEPT=[{row[0]}] | "
-            f"SEM=[{row[1]}] | "
-            f"COUNT={row[2]}"
-        )
-
-    print(
-        f"📋 TOTAL DEPARTMENT/SEMESTER GROUPS = "
-        f"{len(all_student_rows)}"
-    )
-
-
     try:
 
-        # ======================================================
-        # 🔥 THEORY CASE → section = all → ignore section filter
-        # ======================================================
+        # ==================================================
+        # THEORY
+        # section = all
+        #
+        # Do NOT filter by section.
+        # ==================================================
+
         if section.lower() == "all":
 
             cur.execute("""
@@ -2635,18 +2587,63 @@ def get_students(department: str, semester: str, section: str):
                     semester,
                     section
                 FROM students
-                WHERE LOWER(COALESCE(department,'')) = LOWER(%s)
-                  AND LOWER(COALESCE(semester,''))   = LOWER(%s)
+                WHERE
+                    LOWER(
+                        TRIM(
+                            COALESCE(department, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
 
-                  -- 🔥 REMOVE ONLY MANUAL DETAINED STUDENTS
-                  AND COALESCE(status_locked,0) = 0
-                  AND UPPER(COALESCE(academic_status,'ACTIVE')) = 'ACTIVE'
-                ORDER BY sbrn
-            """, (department, semester))
+                    AND
 
-        # ======================================================
-        # 🔥 PRACTICAL CASE → filter by section
-        # ======================================================
+                    LOWER(
+                        TRIM(
+                            COALESCE(semester, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    COALESCE(
+                        status_locked,
+                        0
+                    ) = 0
+
+                    AND
+
+                    UPPER(
+                        TRIM(
+                            COALESCE(
+                                academic_status,
+                                'ACTIVE'
+                            )
+                        )
+                    )
+                    =
+                    'ACTIVE'
+
+                ORDER BY
+                    sbrn
+            """, (
+                department,
+                semester
+            ))
+
+        # ==================================================
+        # PRACTICAL
+        # section = A / B / etc.
+        #
+        # Filter by section.
+        # ==================================================
+
         else:
 
             cur.execute("""
@@ -2657,39 +2654,101 @@ def get_students(department: str, semester: str, section: str):
                     semester,
                     section
                 FROM students
-                WHERE LOWER(COALESCE(department,'')) = LOWER(%s)
-                  AND LOWER(COALESCE(semester,''))   = LOWER(%s)
-                  AND LOWER(COALESCE(section,''))    = LOWER(%s)
+                WHERE
+                    LOWER(
+                        TRIM(
+                            COALESCE(department, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
 
-                  -- 🔥 REMOVE ONLY MANUAL DETAINED STUDENTS
-                  AND COALESCE(status_locked,0) = 0
-                  AND UPPER(COALESCE(academic_status,'ACTIVE')) = 'ACTIVE'
+                    AND
 
-                ORDER BY sbrn
-            """, (department, semester, section))
+                    LOWER(
+                        TRIM(
+                            COALESCE(semester, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    LOWER(
+                        TRIM(
+                            COALESCE(section, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    COALESCE(
+                        status_locked,
+                        0
+                    ) = 0
+
+                    AND
+
+                    UPPER(
+                        TRIM(
+                            COALESCE(
+                                academic_status,
+                                'ACTIVE'
+                            )
+                        )
+                    )
+                    =
+                    'ACTIVE'
+
+                ORDER BY
+                    sbrn
+            """, (
+                department,
+                semester,
+                section
+            ))
 
         rows = cur.fetchall()
 
+        # ==================================================
+        # RESPONSE
+        # ==================================================
+
+        return [
+            {
+                "sbrn": r[0],
+                "name": r[1],
+                "department": r[2],
+                "semester": r[3],
+                "section": r[4]
+            }
+            for r in rows
+        ]
+
     except Exception as e:
+
+        print(
+            "❌ /students ERROR:",
+            str(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
         release_db(conn)
-        raise HTTPException(status_code=500, detail=str(e))
-
-    release_db(conn)
-
-    # ======================================================
-    # RESPONSE FORMAT
-    # ======================================================
-    return [
-        {
-            "sbrn": r[0],
-            "name": r[1],
-            "department": r[2],
-            "semester": r[3],
-            "section": r[4]
-        }
-        for r in rows
-    ]
-
 
 from fastapi import Body, HTTPException
 
