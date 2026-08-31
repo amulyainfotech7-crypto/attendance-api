@@ -1633,93 +1633,119 @@ def get_semesters(department: str):
     try:
 
         cur.execute("""
-            SELECT DISTINCT semester
+            SELECT
+                semester
             FROM (
+                SELECT DISTINCT
+                    semester,
+                    CASE
+                        WHEN LOWER(TRIM(semester))
+                             IN (
+                                 '1',
+                                 '1st',
+                                 'first',
+                                 'first semester',
+                                 'semester 1',
+                                 'sem 1',
+                                 '1st semester'
+                             )
+                            THEN 1
 
-                -- STUDENTS
-                SELECT semester
-                FROM students
-                WHERE LOWER(TRIM(department))
-                      = LOWER(TRIM(%s))
-                  AND semester IS NOT NULL
-                  AND TRIM(semester) <> ''
+                        WHEN LOWER(TRIM(semester))
+                             IN (
+                                 '2',
+                                 '2nd',
+                                 'second',
+                                 'second semester',
+                                 'semester 2',
+                                 'sem 2',
+                                 '2nd semester'
+                             )
+                            THEN 2
 
-                UNION
+                        WHEN LOWER(TRIM(semester))
+                             IN (
+                                 '3',
+                                 '3rd',
+                                 'third',
+                                 'third semester',
+                                 'semester 3',
+                                 'sem 3',
+                                 '3rd semester'
+                             )
+                            THEN 3
 
-                -- TIMETABLE
-                SELECT semester
-                FROM timetable_slots
-                WHERE LOWER(TRIM(department))
-                      = LOWER(TRIM(%s))
-                  AND semester IS NOT NULL
-                  AND TRIM(semester) <> ''
+                        WHEN LOWER(TRIM(semester))
+                             IN (
+                                 '4',
+                                 '4th',
+                                 'fourth',
+                                 'fourth semester',
+                                 'semester 4',
+                                 'sem 4',
+                                 '4th semester'
+                             )
+                            THEN 4
 
-            ) x
+                        WHEN LOWER(TRIM(semester))
+                             IN (
+                                 '5',
+                                 '5th',
+                                 'fifth',
+                                 'fifth semester',
+                                 'semester 5',
+                                 'sem 5',
+                                 '5th semester'
+                             )
+                            THEN 5
+
+                        WHEN LOWER(TRIM(semester))
+                             IN (
+                                 '6',
+                                 '6th',
+                                 'sixth',
+                                 'sixth semester',
+                                 'semester 6',
+                                 'sem 6',
+                                 '6th semester'
+                             )
+                            THEN 6
+
+                        ELSE 99
+                    END AS sort_order
+
+                FROM (
+
+                    -- ==========================================
+                    -- STUDENTS
+                    -- ==========================================
+
+                    SELECT semester
+                    FROM students
+                    WHERE LOWER(TRIM(department))
+                          = LOWER(TRIM(%s))
+                      AND semester IS NOT NULL
+                      AND TRIM(semester) <> ''
+
+                    UNION
+
+                    -- ==========================================
+                    -- TIMETABLE
+                    -- ==========================================
+
+                    SELECT semester
+                    FROM timetable_slots
+                    WHERE LOWER(TRIM(department))
+                          = LOWER(TRIM(%s))
+                      AND semester IS NOT NULL
+                      AND TRIM(semester) <> ''
+
+                ) AS all_semesters
+
+            ) AS ordered_semesters
 
             ORDER BY
-                CASE
-                    WHEN LOWER(TRIM(semester))
-                         IN (
-                             '1', '1st', 'first',
-                             'first semester',
-                             'semester 1',
-                             'sem 1',
-                             '1st semester'
-                         )
-                        THEN 1
-
-                    WHEN LOWER(TRIM(semester))
-                         IN (
-                             '2', '2nd', 'second',
-                             'second semester',
-                             'semester 2',
-                             'sem 2',
-                             '2nd semester'
-                         )
-                        THEN 2
-
-                    WHEN LOWER(TRIM(semester))
-                         IN (
-                             '3', '3rd', 'third',
-                             'third semester',
-                             'semester 3',
-                             'sem 3',
-                             '3rd semester'
-                         )
-                        THEN 3
-
-                    WHEN LOWER(TRIM(semester))
-                         IN (
-                             '4', '4th', 'fourth',
-                             'fourth semester',
-                             'semester 4',
-                             'sem 4',
-                             '4th semester'
-                         )
-                        THEN 4
-
-                    WHEN LOWER(TRIM(semester))
-                         IN (
-                             '5', '5th', 'fifth',
-                             'fifth semester',
-                             'semester 5',
-                             'sem 5',
-                             '5th semester'
-                         )
-                        THEN 5
-
-                    WHEN LOWER(TRIM(semester))
-                         IN (
-                             '6', '6th', 'sixth',
-                             'sixth semester',
-                             'semester 6',
-                             'sem 6',
-                             '6th semester'
-                         )
-                        THEN 6
-
-                    ELSE 99
-                END,
+                sort_order,
                 semester
         """, (
             department,
@@ -1743,7 +1769,27 @@ def get_semesters(department: str):
 
         return result
 
+    except Exception as e:
+
+        print(
+            "❌ GET /semesters ERROR:"
+        )
+
+        print(
+            f"Department = {department}"
+        )
+
+        print(
+            f"Error = {e}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load semesters: {str(e)}"
+        )
+
     finally:
+
         release_db(conn)
 
 # ======================================================
