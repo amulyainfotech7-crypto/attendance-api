@@ -1619,21 +1619,132 @@ def get_departments():
 @app.get("/semesters")
 def get_semesters(department: str):
 
+    department = str(department or "").strip()
+
+    if not department:
+        raise HTTPException(
+            status_code=400,
+            detail="Department is required"
+        )
+
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT DISTINCT semester
-        FROM students
-        WHERE LOWER(department)=LOWER(%s)
-        ORDER BY semester
-    """, (department,))
+    try:
 
-    rows = cur.fetchall()
-    release_db(conn)
+        cur.execute("""
+            SELECT DISTINCT semester
+            FROM (
 
-    return [r[0] for r in rows]
+                -- STUDENTS
+                SELECT semester
+                FROM students
+                WHERE LOWER(TRIM(department))
+                      = LOWER(TRIM(%s))
+                  AND semester IS NOT NULL
+                  AND TRIM(semester) <> ''
 
+                UNION
+
+                -- TIMETABLE
+                SELECT semester
+                FROM timetable_slots
+                WHERE LOWER(TRIM(department))
+                      = LOWER(TRIM(%s))
+                  AND semester IS NOT NULL
+                  AND TRIM(semester) <> ''
+
+            ) x
+
+            ORDER BY
+                CASE
+                    WHEN LOWER(TRIM(semester))
+                         IN (
+                             '1', '1st', 'first',
+                             'first semester',
+                             'semester 1',
+                             'sem 1',
+                             '1st semester'
+                         )
+                        THEN 1
+
+                    WHEN LOWER(TRIM(semester))
+                         IN (
+                             '2', '2nd', 'second',
+                             'second semester',
+                             'semester 2',
+                             'sem 2',
+                             '2nd semester'
+                         )
+                        THEN 2
+
+                    WHEN LOWER(TRIM(semester))
+                         IN (
+                             '3', '3rd', 'third',
+                             'third semester',
+                             'semester 3',
+                             'sem 3',
+                             '3rd semester'
+                         )
+                        THEN 3
+
+                    WHEN LOWER(TRIM(semester))
+                         IN (
+                             '4', '4th', 'fourth',
+                             'fourth semester',
+                             'semester 4',
+                             'sem 4',
+                             '4th semester'
+                         )
+                        THEN 4
+
+                    WHEN LOWER(TRIM(semester))
+                         IN (
+                             '5', '5th', 'fifth',
+                             'fifth semester',
+                             'semester 5',
+                             'sem 5',
+                             '5th semester'
+                         )
+                        THEN 5
+
+                    WHEN LOWER(TRIM(semester))
+                         IN (
+                             '6', '6th', 'sixth',
+                             'sixth semester',
+                             'semester 6',
+                             'sem 6',
+                             '6th semester'
+                         )
+                        THEN 6
+
+                    ELSE 99
+                END,
+                semester
+        """, (
+            department,
+            department
+        ))
+
+        rows = cur.fetchall()
+
+        result = [
+            str(row[0]).strip()
+            for row in rows
+            if row[0] is not None
+            and str(row[0]).strip()
+        ]
+
+        print(
+            "📚 SEMESTERS API → "
+            f"Department={department} | "
+            f"Semesters={result}"
+        )
+
+        return result
+
+    finally:
+        release_db(conn)
 
 # ======================================================
 # 🔥 FACULTY SYNC (LOCAL → CLOUD)
@@ -2344,6 +2455,8 @@ def get_subjects_by_date(
     finally:
 
         release_db(conn)
+
+
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
 # ======================================================
