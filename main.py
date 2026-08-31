@@ -2589,6 +2589,37 @@ def get_students(department: str, semester: str, section: str):
     print("=" * 80)
 
 
+    # ======================================================
+    # 🔎 CHECK ALL STUDENTS IN CLOUD DATABASE
+    # ======================================================
+
+    cur.execute("""
+        SELECT
+            department,
+            semester,
+            COUNT(*)
+        FROM students
+        GROUP BY department, semester
+        ORDER BY department, semester
+    """)
+
+    all_student_rows = cur.fetchall()
+
+    print("📋 ALL STUDENTS CURRENTLY IN CLOUD:")
+
+    for row in all_student_rows:
+        print(
+            f"   DEPT=[{row[0]}] | "
+            f"SEM=[{row[1]}] | "
+            f"COUNT={row[2]}"
+        )
+
+    print(
+        f"📋 TOTAL DEPARTMENT/SEMESTER GROUPS = "
+        f"{len(all_student_rows)}"
+    )
+
+
     try:
 
         # ======================================================
