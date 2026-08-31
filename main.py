@@ -2513,6 +2513,82 @@ def get_students(department: str, semester: str, section: str):
     conn = connect_db()
     cur = conn.cursor()
 
+
+    print("=" * 80)
+    print("🔎 STUDENTS API DIAGNOSTIC")
+    print(f"Requested department = [{department}]")
+    print(f"Requested semester   = [{semester}]")
+    print(f"Requested section    = [{section}]")
+
+    # ------------------------------------------------------
+    # 1. Check whether ANY students exist for this semester
+    # ------------------------------------------------------
+    cur.execute("""
+        SELECT
+            department,
+            semester,
+            section,
+            COUNT(*)
+        FROM students
+        WHERE LOWER(TRIM(COALESCE(semester,''))) =
+            LOWER(TRIM(%s))
+        GROUP BY department, semester, section
+        ORDER BY department, section
+    """, (semester,))
+
+    debug_rows = cur.fetchall()
+
+    print("📊 STUDENTS FOUND FOR REQUESTED SEMESTER:")
+
+    for row in debug_rows:
+        print(
+            f"   DEPT=[{row[0]}] | "
+            f"SEM=[{row[1]}] | "
+            f"SECTION=[{row[2]}] | "
+            f"COUNT={row[3]}"
+        )
+
+    # ------------------------------------------------------
+    # 2. Check exact requested department
+    # ------------------------------------------------------
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM students
+        WHERE LOWER(TRIM(COALESCE(department,''))) =
+            LOWER(TRIM(%s))
+        AND LOWER(TRIM(COALESCE(semester,''))) =
+            LOWER(TRIM(%s))
+    """, (department, semester))
+
+    exact_count = cur.fetchone()[0]
+
+    print(
+        f"🎯 EXACT MATCH COUNT = {exact_count}"
+    )
+
+    # ------------------------------------------------------
+    # 3. Check active students for exact combination
+    # ------------------------------------------------------
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM students
+        WHERE LOWER(TRIM(COALESCE(department,''))) =
+            LOWER(TRIM(%s))
+        AND LOWER(TRIM(COALESCE(semester,''))) =
+            LOWER(TRIM(%s))
+        AND COALESCE(status_locked,0) = 0
+        AND UPPER(COALESCE(academic_status,'ACTIVE')) = 'ACTIVE'
+    """, (department, semester))
+
+    active_count = cur.fetchone()[0]
+
+    print(
+        f"🟢 ACTIVE EXACT MATCH COUNT = {active_count}"
+    )
+
+    print("=" * 80)
+
+
     try:
 
         # ======================================================
