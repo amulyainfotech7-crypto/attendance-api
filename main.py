@@ -5197,6 +5197,129 @@ def delete_activity_attendance(records: list = Body(...)):
 
         release_db(conn)
 
+
+# ============================================================
+# 🔎 TRANSFER-IN ATTENDANCE — CLOUD FULL DIAGNOSTIC
+# ============================================================
+
+@app.get("/diagnostic/attendance-transfer-in")
+def diagnostic_attendance_transfer_in(
+    sbrn: str,
+    semester: str
+):
+    """
+    READ-ONLY diagnostic.
+
+    Shows ALL Transfer-In attendance rows for:
+        SBRN + Semester
+
+    This is specifically used to detect:
+        - current subject-ID rows
+        - legacy subject-name rows
+        - duplicate logical records
+    """
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        print()
+        print("=" * 90)
+        print("🔎 TRANSFER-IN ATTENDANCE — CLOUD FULL DIAGNOSTIC")
+        print("=" * 90)
+        print(f"SBRN     : {sbrn}")
+        print(f"Semester : {semester}")
+        print("-" * 90)
+
+        cur.execute("""
+            SELECT
+                id,
+                sbrn,
+                semester,
+                subject,
+                previous_institution,
+                total_delivered,
+                total_attended,
+                remarks,
+                version,
+                sync_pending,
+                last_updated
+            FROM attendance_transfer_in
+            WHERE TRIM(sbrn) = TRIM(%s)
+              AND LOWER(TRIM(semester))
+                  = LOWER(TRIM(%s))
+            ORDER BY id
+        """, (
+            sbrn,
+            semester
+        ))
+
+        rows = cur.fetchall()
+
+        print(
+            f"☁ Cloud rows found : {len(rows)}"
+        )
+
+        for row in rows:
+
+            print(
+                "   "
+                f"ID={row[0]} | "
+                f"SBRN={row[1]} | "
+                f"Semester={row[2]} | "
+                f"Subject={row[3]} | "
+                f"Delivered={row[5]} | "
+                f"Attended={row[6]} | "
+                f"Pending={row[9]}"
+            )
+
+        print("=" * 90)
+
+        return {
+            "status": "success",
+            "sbrn": sbrn,
+            "semester": semester,
+            "count": len(rows),
+            "records": [
+                {
+                    "id": r[0],
+                    "sbrn": r[1],
+                    "semester": r[2],
+                    "subject": r[3],
+                    "previous_institution": r[4],
+                    "total_delivered": r[5],
+                    "total_attended": r[6],
+                    "remarks": r[7],
+                    "version": r[8],
+                    "sync_pending": r[9],
+                    "last_updated": (
+                        r[10].isoformat()
+                        if r[10]
+                        else None
+                    )
+                }
+                for r in rows
+            ]
+        }
+
+    except Exception as e:
+
+        print(
+            "❌ Transfer-In diagnostic failed:",
+            e
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
+        release_db(conn)
+
+
 # ======================================================
 # UNIVERSAL SYNC DOWNLOAD (SAFE + FAST)
 # ======================================================
