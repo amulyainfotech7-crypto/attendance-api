@@ -4195,11 +4195,42 @@ def universal_sync_upload(
                 detail=f"No primary key for {table_name}"
             )
 
-        conflict_key = (
-            "(" +
-            ",".join(pk_columns) +
-            ")"
-        )
+        # ==================================================
+        # SPECIAL CONFLICT KEY
+        # ==================================================
+        #
+        # attendance_transfer_in:
+        #
+        # PostgreSQL primary key:
+        #     id
+        #
+        # Logical unique key:
+        #     sbrn + semester + subject
+        #
+        # The client removes the local SQLite id before
+        # uploading. Therefore ON CONFLICT(id) cannot
+        # detect an existing Transfer-In attendance row.
+        #
+        # PostgreSQL already has:
+        #
+        #     UNIQUE(sbrn, semester, subject)
+        #
+        # so Transfer-In must use that constraint.
+        # ==================================================
+
+        if table_name == "attendance_transfer_in":
+
+            conflict_key = (
+                "(sbrn,semester,subject)"
+            )
+
+        else:
+
+            conflict_key = (
+                "(" +
+                ",".join(pk_columns) +
+                ")"
+            )
 
         print(
             f"🔑 Primary Key: {pk_columns}"
@@ -4303,6 +4334,7 @@ def universal_sync_upload(
             server_time_row = cur.fetchone()
 
             if server_time_row is None:
+
                 raise RuntimeError(
                     "❌ PostgreSQL could not obtain CURRENT_TIMESTAMP"
                 )
@@ -4418,6 +4450,7 @@ def universal_sync_upload(
         print(f"📦 Table       : {table_name}")
         print(f"🔑 Primary Key : {pk_columns}")
         print(f"📋 Columns     : {columns}")
+        print(f"🔐 Conflict Key: {conflict_key}")
 
         if "sync_pending" in columns:
 
@@ -4574,6 +4607,55 @@ def universal_sync_upload(
                 )
 
         # ==================================================
+        # VERIFY TRANSFER-IN ATTENDANCE
+        # ==================================================
+
+        elif table_name == "attendance_transfer_in":
+
+            print(
+                "\n🔍 VERIFYING attendance_transfer_in IN CLOUD"
+            )
+
+            for row in records:
+
+                sbrn = row.get("sbrn")
+                semester = row.get("semester")
+                subject = row.get("subject")
+
+                if not sbrn:
+                    continue
+
+                cur.execute("""
+                    SELECT
+                        id,
+                        sbrn,
+                        semester,
+                        subject,
+                        previous_institution,
+                        total_delivered,
+                        total_attended,
+                        remarks,
+                        version,
+                        sync_pending,
+                        last_updated
+                    FROM attendance_transfer_in
+                    WHERE sbrn=%s
+                      AND semester=%s
+                      AND subject=%s
+                """, (
+                    sbrn,
+                    semester,
+                    subject
+                ))
+
+                verify = cur.fetchone()
+
+                print(
+                    "☁ CLOUD attendance_transfer_in:",
+                    verify
+                )
+
+        # ==================================================
         # BROADCAST
         # ==================================================
 
@@ -4637,7 +4719,6 @@ def universal_sync_upload(
         "table": table_name,
         "rows": len(records)
     }
-
 # ======================================================
 # FACULTY SUBJECT MAP - DEDICATED CLOUD SYNC
 # ======================================================
