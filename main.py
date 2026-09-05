@@ -2814,6 +2814,7 @@ def delete_cloud_row(table: str, row_id: str):
         "result_subjects",
         "exam_marks",
         "master_attendance",
+        "faculty_leave_substitute",
     }
 
     if table not in allowed_tables:
@@ -3005,6 +3006,136 @@ def delete_cloud_row(table: str, row_id: str):
             print(
                 f"🗑 FACULTY SUBJECT MAP "
                 f"ROWS DELETED: {deleted_rows}"
+            )
+
+        # --------------------------------------------------
+        # FACULTY LEAVE / SUBSTITUTE
+        # --------------------------------------------------
+        elif table == "faculty_leave_substitute":
+
+            import json
+
+            # The substitution table uses a logical identity rather
+            # than relying on a SQLite/PostgreSQL auto-increment ID.
+            # The desktop queue may therefore send row_id as JSON.
+            #
+            # Supported row_id formats:
+            #   1. JSON logical key containing the substitution fields
+            #   2. Numeric cloud id, when available
+
+            deleted_rows = 0
+
+            key_data = None
+            try:
+                key_data = json.loads(row_id)
+            except Exception:
+                key_data = None
+
+            if isinstance(key_data, dict):
+
+                department = str(
+                    key_data.get("department", "")
+                ).strip()
+                semester = str(
+                    key_data.get("semester", "")
+                ).strip()
+                class_date = str(
+                    key_data.get("class_date", "")
+                ).strip()
+                period_no = key_data.get("period_no")
+                section = str(
+                    key_data.get("section", "")
+                ).strip()
+                subject_id = str(
+                    key_data.get("subject_id", "")
+                ).strip()
+                original_faculty_id = str(
+                    key_data.get("original_faculty_id", "")
+                ).strip()
+
+                if not all([
+                    department,
+                    semester,
+                    class_date,
+                    period_no is not None,
+                    section,
+                    subject_id,
+                    original_faculty_id,
+                ]):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Incomplete faculty_leave_substitute "
+                            "DELETE key. Required: department, "
+                            "semester, class_date, period_no, "
+                            "section, subject_id, original_faculty_id."
+                        )
+                    )
+
+                print("\n" + "=" * 80)
+                print("🗑 FACULTY LEAVE / SUBSTITUTE CLOUD DELETE")
+                print(f"   Department           : {department}")
+                print(f"   Semester             : {semester}")
+                print(f"   Class Date           : {class_date}")
+                print(f"   Period               : {period_no}")
+                print(f"   Section              : {section}")
+                print(f"   Subject              : {subject_id}")
+                print(f"   Original Faculty     : {original_faculty_id}")
+                print("=" * 80)
+
+                cur.execute(
+                    """
+                    DELETE FROM faculty_leave_substitute
+                    WHERE department = %s
+                      AND semester = %s
+                      AND class_date = %s
+                      AND period_no = %s
+                      AND section = %s
+                      AND subject_id = %s
+                      AND original_faculty_id = %s
+                    """,
+                    (
+                        department,
+                        semester,
+                        class_date,
+                        period_no,
+                        section,
+                        subject_id,
+                        original_faculty_id,
+                    )
+                )
+
+                deleted_rows = cur.rowcount
+
+            else:
+
+                # Fallback for installations where the cloud table
+                # exposes an integer/surrogate id and the queue stores
+                # that id directly.
+                try:
+                    numeric_id = int(str(row_id).strip())
+                except Exception:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Invalid faculty_leave_substitute DELETE key. "
+                            "Expected logical-key JSON or numeric id."
+                        )
+                    )
+
+                cur.execute(
+                    """
+                    DELETE FROM faculty_leave_substitute
+                    WHERE id = %s
+                    """,
+                    (numeric_id,)
+                )
+
+                deleted_rows = cur.rowcount
+
+            print(
+                f"🗑 FACULTY LEAVE / SUBSTITUTE ROWS DELETED: "
+                f"{deleted_rows}"
             )
 
         # --------------------------------------------------
