@@ -1581,6 +1581,86 @@ def login(data: LoginModel):
         "role": user[2],
         "faculty_id": user[4]
     }
+
+# ======================================================
+# FACULTY WORKLOAD
+# Returns ONLY departments and semesters assigned
+# to the logged-in faculty
+# ======================================================
+
+@app.get("/faculty-workload")
+def get_faculty_workload(faculty_id: str):
+
+    faculty_id = str(faculty_id or "").strip()
+
+    if not faculty_id:
+        raise HTTPException(
+            status_code=400,
+            detail="faculty_id is required"
+        )
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        cur.execute("""
+            SELECT DISTINCT
+                department,
+                semester
+            FROM faculty_subject_map
+            WHERE LOWER(TRIM(faculty_id))
+                  = LOWER(TRIM(%s))
+              AND COALESCE(LOWER(TRIM(status)), 'active')
+                  = 'active'
+              AND department IS NOT NULL
+              AND TRIM(department) <> ''
+              AND semester IS NOT NULL
+              AND TRIM(semester) <> ''
+            ORDER BY
+                department,
+                semester
+        """, (faculty_id,))
+
+        rows = cur.fetchall()
+
+        result = [
+            {
+                "department": str(row[0]).strip(),
+                "semester": str(row[1]).strip()
+            }
+            for row in rows
+            if row[0] and row[1]
+        ]
+
+        print(
+            "📚 FACULTY WORKLOAD API → "
+            f"Faculty={faculty_id} | "
+            f"Workload={result}"
+        )
+
+        return {
+            "status": "success",
+            "faculty_id": faculty_id,
+            "workload": result
+        }
+
+    except Exception as e:
+
+        print(
+            "❌ GET /faculty-workload ERROR:",
+            e
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load faculty workload: {str(e)}"
+        )
+
+    finally:
+        release_db(conn)
+
+
 # ======================================================
 # GET DEPARTMENTS
 # ======================================================
