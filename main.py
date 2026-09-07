@@ -1551,9 +1551,16 @@ def login(data: LoginModel):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT username, password, role, active
-        FROM users
-        WHERE username=%s
+        SELECT
+            u.username,
+            u.password,
+            u.role,
+            u.active,
+            f.faculty_id
+        FROM users u
+        LEFT JOIN faculty f
+            ON LOWER(TRIM(f.name)) = LOWER(TRIM(u.username))
+        WHERE u.username=%s
     """, (data.username,))
 
     user = cur.fetchone()
@@ -1571,7 +1578,8 @@ def login(data: LoginModel):
     return {
         "status": "success",
         "username": user[0],
-        "role": user[2]
+        "role": user[2],
+        "faculty_id": user[4]
     }
 
 # ======================================================
