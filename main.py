@@ -2224,9 +2224,8 @@ def get_subjects_by_date(
     """
     Return timetable subjects with the REAL full subject name.
 
-    IMPORTANT:
-        Only subjects mapped to the selected faculty
-        through faculty_subject_map are returned.
+    ONLY subjects mapped to the selected faculty through
+    faculty_subject_map are returned.
 
     1st / 2nd Semester:
         Architecture Assistantship
@@ -2409,14 +2408,7 @@ def get_subjects_by_date(
 
             FROM timetable_slots t
 
-            # ====================================================
-            # FACULTY SUBJECT MAP
-            #
-            # ONLY subjects assigned to this faculty are allowed.
-            # ====================================================
-
             INNER JOIN faculty_subject_map fsm
-
                 ON LOWER(
                     TRIM(fsm.faculty_id)
                 )
@@ -2434,11 +2426,16 @@ def get_subjects_by_date(
                 )
 
                 AND LOWER(
-                    TRIM(fsm.department)
+                    TRIM(
+                        COALESCE(
+                            fsm.department,
+                            ''
+                        )
+                    )
                 )
                 =
                 LOWER(
-                    TRIM(t.department)
+                    TRIM(%s)
                 )
 
                 AND LOWER(
@@ -2456,10 +2453,6 @@ def get_subjects_by_date(
                     'active'
                 ) = 'active'
 
-            # ====================================================
-            # SUBJECT NAME / TYPE
-            # ====================================================
-
             LEFT JOIN LATERAL (
 
                 SELECT
@@ -2469,7 +2462,6 @@ def get_subjects_by_date(
                 FROM subjects sx
 
                 INNER JOIN subject_semester_map sm
-
                     ON LOWER(
                         TRIM(sm.subject_id)
                     )
@@ -2558,10 +2550,6 @@ def get_subjects_by_date(
 
             ) s ON TRUE
 
-            # ====================================================
-            # TIMETABLE FILTER
-            # ====================================================
-
             WHERE
 
                 LOWER(
@@ -2603,34 +2591,28 @@ def get_subjects_by_date(
 
         """, (
 
-            # ----------------------------------------------------
-            # 1. Faculty mapping
-            # ----------------------------------------------------
+            # 1. Faculty ID
             faculty_id,
 
-            # ----------------------------------------------------
-            # 2. Subject name resolution
-            # ----------------------------------------------------
+            # 2. FACULTY MAPPING department
+            #    For 1st/2nd semester this becomes
+            #    Applied Sciences & Humanities
             subject_department,
 
-            # ----------------------------------------------------
-            # 3. Subject department priority
-            # ----------------------------------------------------
+            # 3. SUBJECT SEMESTER MAP department
             subject_department,
 
-            # ----------------------------------------------------
-            # 4. Timetable department
-            # ----------------------------------------------------
+            # 4. SUBJECT SEMESTER MAP priority
+            subject_department,
+
+            # 5. TIMETABLE department
+            #    Remains Civil Engineering
             department,
 
-            # ----------------------------------------------------
-            # 5. Timetable semester
-            # ----------------------------------------------------
+            # 6. TIMETABLE semester
             semester,
 
-            # ----------------------------------------------------
-            # 6. Timetable day
-            # ----------------------------------------------------
+            # 7. TIMETABLE day
             weekday_short
 
         ))
@@ -2684,15 +2666,10 @@ def get_subjects_by_date(
             )
 
             result.append({
-
                 "subject_id": subject_id,
-
                 "subject_name": subject_name,
-
                 "type": subject_type,
-
                 "sections": clean_sections
-
             })
 
         return result
