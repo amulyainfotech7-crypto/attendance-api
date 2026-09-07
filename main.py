@@ -3406,24 +3406,42 @@ def delete_cloud_row(table: str, row_id: str):
 # ======================================================
 
 @app.get("/attendance-exists")
-def attendance_exists(semester: str, section: str, subject: str, date: str):
+def attendance_exists(
+    department: str,
+    semester: str,
+    section: str,
+    subject: str,
+    date: str
+):
 
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT 1 FROM attendance_daily
-        WHERE LOWER(semester)=LOWER(%s)
-          AND LOWER(subject)=LOWER(%s)
-          AND class_date=%s
-          AND LOWER(section)=LOWER(%s)
-        LIMIT 1
-    """, (semester, subject, date, section))
+    try:
+        cur.execute("""
+            SELECT 1
+            FROM attendance_daily
+            WHERE LOWER(TRIM(department)) = LOWER(TRIM(%s))
+              AND LOWER(TRIM(semester))   = LOWER(TRIM(%s))
+              AND LOWER(TRIM(subject))    = LOWER(TRIM(%s))
+              AND class_date = %s
+              AND LOWER(TRIM(section))    = LOWER(TRIM(%s))
+            LIMIT 1
+        """, (
+            department,
+            semester,
+            subject,
+            date,
+            section
+        ))
 
-    exists = cur.fetchone() is not None
-    release_db(conn)
+        exists = cur.fetchone() is not None
 
-    return {"exists": exists}
+        return {"exists": exists}
+
+    finally:
+        release_db(conn)
+
 
 # ======================================================
 # MARK ATTENDANCE (PERMANENT DESKTOP-ALIGNED VERSION)
