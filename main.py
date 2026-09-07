@@ -2210,17 +2210,23 @@ def get_timetable(department: str, semester: str, day: str):
 
 
 # ======================================================
-# SUBJECTS BY DATE (FIXED WITH SECTION SUPPORT)
+# SUBJECTS BY DATE
+# FACULTY MAPPED SUBJECTS ONLY
 # ======================================================
 
 @app.get("/subjects-by-date")
 def get_subjects_by_date(
     department: str,
     semester: str,
-    date: str
+    date: str,
+    faculty_id: str
 ):
     """
     Return timetable subjects with the REAL full subject name.
+
+    IMPORTANT:
+        Only subjects mapped to the selected faculty
+        through faculty_subject_map are returned.
 
     1st / 2nd Semester:
         Architecture Assistantship
@@ -2251,6 +2257,10 @@ def get_subjects_by_date(
         semester or ""
     ).strip()
 
+    faculty_id = str(
+        faculty_id or ""
+    ).strip()
+
     if not department:
         raise HTTPException(
             status_code=400,
@@ -2261,6 +2271,12 @@ def get_subjects_by_date(
         raise HTTPException(
             status_code=400,
             detail="Semester is required"
+        )
+
+    if not faculty_id:
+        raise HTTPException(
+            status_code=400,
+            detail="faculty_id is required"
         )
 
     # ============================================================
@@ -2305,7 +2321,10 @@ def get_subjects_by_date(
         subject_department = department
 
     print("=" * 80)
-    print("📚 SUBJECT API DEPARTMENT RESOLUTION")
+    print("📚 FACULTY SUBJECT API")
+    print(
+        f"Faculty ID          : {faculty_id}"
+    )
     print(
         f"Selected Department : {department}"
     )
@@ -2334,7 +2353,8 @@ def get_subjects_by_date(
             semester
         ):
             print(
-                "DEBUG: Holiday or Non-working day → No subjects"
+                "DEBUG: Holiday or Non-working day "
+                "→ No subjects"
             )
             return []
 
@@ -2389,6 +2409,57 @@ def get_subjects_by_date(
 
             FROM timetable_slots t
 
+            # ====================================================
+            # FACULTY SUBJECT MAP
+            #
+            # ONLY subjects assigned to this faculty are allowed.
+            # ====================================================
+
+            INNER JOIN faculty_subject_map fsm
+
+                ON LOWER(
+                    TRIM(fsm.faculty_id)
+                )
+                =
+                LOWER(
+                    TRIM(%s)
+                )
+
+                AND LOWER(
+                    TRIM(fsm.subject_id)
+                )
+                =
+                LOWER(
+                    TRIM(t.subject_id)
+                )
+
+                AND LOWER(
+                    TRIM(fsm.department)
+                )
+                =
+                LOWER(
+                    TRIM(t.department)
+                )
+
+                AND LOWER(
+                    TRIM(fsm.semester)
+                )
+                =
+                LOWER(
+                    TRIM(t.semester)
+                )
+
+                AND COALESCE(
+                    LOWER(
+                        TRIM(fsm.status)
+                    ),
+                    'active'
+                ) = 'active'
+
+            # ====================================================
+            # SUBJECT NAME / TYPE
+            # ====================================================
+
             LEFT JOIN LATERAL (
 
                 SELECT
@@ -2398,6 +2469,7 @@ def get_subjects_by_date(
                 FROM subjects sx
 
                 INNER JOIN subject_semester_map sm
+
                     ON LOWER(
                         TRIM(sm.subject_id)
                     )
@@ -2486,6 +2558,10 @@ def get_subjects_by_date(
 
             ) s ON TRUE
 
+            # ====================================================
+            # TIMETABLE FILTER
+            # ====================================================
+
             WHERE
 
                 LOWER(
@@ -2527,10 +2603,34 @@ def get_subjects_by_date(
 
         """, (
 
+            # ----------------------------------------------------
+            # 1. Faculty mapping
+            # ----------------------------------------------------
+            faculty_id,
+
+            # ----------------------------------------------------
+            # 2. Subject name resolution
+            # ----------------------------------------------------
             subject_department,
+
+            # ----------------------------------------------------
+            # 3. Subject department priority
+            # ----------------------------------------------------
             subject_department,
+
+            # ----------------------------------------------------
+            # 4. Timetable department
+            # ----------------------------------------------------
             department,
+
+            # ----------------------------------------------------
+            # 5. Timetable semester
+            # ----------------------------------------------------
             semester,
+
+            # ----------------------------------------------------
+            # 6. Timetable day
+            # ----------------------------------------------------
             weekday_short
 
         ))
@@ -2538,9 +2638,13 @@ def get_subjects_by_date(
         rows = cur.fetchall()
 
         print(
-            "DEBUG subjects found:",
+            "📚 FACULTY MAPPED SUBJECTS FOUND:",
             len(rows)
         )
+
+        # ========================================================
+        # BUILD RESULT
+        # ========================================================
 
         result = []
 
@@ -2564,23 +2668,31 @@ def get_subjects_by_date(
                 else []
             )
 
+            clean_sections = [
+                s.strip()
+                for s in sections
+                if s and s.strip()
+            ]
+
             print(
-                "📚 SUBJECT API → "
+                "📚 FACULTY SUBJECT → "
+                f"Faculty={faculty_id} | "
                 f"ID={subject_id} | "
                 f"NAME={subject_name} | "
                 f"TYPE={subject_type} | "
-                f"SUBJECT_DEPT={subject_department}"
+                f"SECTIONS={clean_sections}"
             )
 
             result.append({
+
                 "subject_id": subject_id,
+
                 "subject_name": subject_name,
+
                 "type": subject_type,
-                "sections": [
-                    s.strip()
-                    for s in sections
-                    if s.strip()
-                ]
+
+                "sections": clean_sections
+
             })
 
         return result
@@ -2588,7 +2700,6 @@ def get_subjects_by_date(
     finally:
 
         release_db(conn)
-
 
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
