@@ -2227,15 +2227,28 @@ def get_subjects_by_date(
     ONLY subjects mapped to the selected faculty through
     faculty_subject_map are returned.
 
-    1st / 2nd Semester:
-        Architecture Assistantship
-            -> Architecture Assistantship
+    Faculty mapping is matched using:
+        faculty_id
+        selected department
+        selected semester
+        subject_id
+        active status
 
-        Other departments
-            -> Applied Sciences & Humanities
+    For 1st / 2nd Semester:
+
+        Timetable department:
+            Actual selected department
+
+        Subject department:
+            Applied Sciences & Humanities
+
+        Architecture Assistantship:
+            Architecture Assistantship
 
     3rd Semester onward:
-        -> Actual selected department
+
+        Subject department:
+            Actual selected department
 
     subject_id:
         Internal identifier used by attendance/database.
@@ -2317,7 +2330,12 @@ def get_subjects_by_date(
             )
 
     else:
+
         subject_department = department
+
+    # ============================================================
+    # DEBUG INFORMATION
+    # ============================================================
 
     print("=" * 80)
     print("📚 FACULTY SUBJECT API")
@@ -2332,6 +2350,9 @@ def get_subjects_by_date(
     )
     print(
         f"Subject Department  : {subject_department}"
+    )
+    print(
+        f"Date                : {date}"
     )
     print("=" * 80)
 
@@ -2409,6 +2430,7 @@ def get_subjects_by_date(
             FROM timetable_slots t
 
             INNER JOIN faculty_subject_map fsm
+
                 ON LOWER(
                     TRIM(fsm.faculty_id)
                 )
@@ -2426,12 +2448,7 @@ def get_subjects_by_date(
                 )
 
                 AND LOWER(
-                    TRIM(
-                        COALESCE(
-                            fsm.department,
-                            ''
-                        )
-                    )
+                    TRIM(fsm.department)
                 )
                 =
                 LOWER(
@@ -2443,7 +2460,7 @@ def get_subjects_by_date(
                 )
                 =
                 LOWER(
-                    TRIM(t.semester)
+                    TRIM(%s)
                 )
 
                 AND COALESCE(
@@ -2462,6 +2479,7 @@ def get_subjects_by_date(
                 FROM subjects sx
 
                 INNER JOIN subject_semester_map sm
+
                     ON LOWER(
                         TRIM(sm.subject_id)
                     )
@@ -2594,25 +2612,36 @@ def get_subjects_by_date(
             # 1. Faculty ID
             faculty_id,
 
-            # 2. FACULTY MAPPING department
-            #    For 1st/2nd semester this becomes
-            #    Applied Sciences & Humanities
-            subject_department,
-
-            # 3. SUBJECT SEMESTER MAP department
-            subject_department,
-
-            # 4. SUBJECT SEMESTER MAP priority
-            subject_department,
-
-            # 5. TIMETABLE department
-            #    Remains Civil Engineering
+            # 2. FACULTY MAPPING DEPARTMENT
+            #
+            # IMPORTANT:
+            # This MUST be the selected timetable department.
+            #
+            # Example:
+            # Civil Engineering
+            #
             department,
 
-            # 6. TIMETABLE semester
+            # 3. FACULTY MAPPING SEMESTER
             semester,
 
-            # 7. TIMETABLE day
+            # 4. SUBJECT SEMESTER MAP DEPARTMENT
+            #
+            # For 1st/2nd semester:
+            # Applied Sciences & Humanities
+            #
+            subject_department,
+
+            # 5. SUBJECT DEPARTMENT PRIORITY
+            subject_department,
+
+            # 6. TIMETABLE DEPARTMENT
+            department,
+
+            # 7. TIMETABLE SEMESTER
+            semester,
+
+            # 8. TIMETABLE DAY
             weekday_short
 
         ))
