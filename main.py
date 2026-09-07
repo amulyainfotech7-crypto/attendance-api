@@ -1559,7 +1559,7 @@ def login(data: LoginModel):
             f.faculty_id
         FROM users u
         LEFT JOIN faculty f
-            ON LOWER(TRIM(f.name)) = LOWER(TRIM(u.username))
+            ON LOWER(TRIM(f.username)) = LOWER(TRIM(u.username))
         WHERE u.username=%s
     """, (data.username,))
 
@@ -1581,7 +1581,6 @@ def login(data: LoginModel):
         "role": user[2],
         "faculty_id": user[4]
     }
-
 # ======================================================
 # GET DEPARTMENTS
 # ======================================================
