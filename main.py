@@ -2327,7 +2327,6 @@ def get_subjects_by_date(
 
                 COALESCE(
                     NULLIF(TRIM(s.subject_name), ''),
-                    NULLIF(TRIM(t.subject_name), ''),
                     t.subject_id
                 ) AS subject_name,
 
@@ -2377,7 +2376,6 @@ def get_subjects_by_date(
             GROUP BY
                 t.subject_id,
                 s.subject_name,
-                t.subject_name,
                 t.type,
                 s.type
 
@@ -2413,7 +2411,6 @@ def get_subjects_by_date(
 
                 COALESCE(
                     NULLIF(TRIM(s.subject_name), ''),
-                    NULLIF(TRIM(t.subject_name), ''),
                     t.subject_id
                 ) AS subject_name,
 
@@ -2516,7 +2513,7 @@ def get_subjects_by_date(
               AND (
                     original_faculty_id = %s
                     OR substitute_faculty_id = %s
-                  )
+              )
 
             ORDER BY period_no
             """,
@@ -2883,7 +2880,6 @@ def get_subjects_by_date(
             conn.close()
         except Exception:
             pass
-
 
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
