@@ -2222,491 +2222,619 @@ def get_subjects_by_date(
     faculty_id: str
 ):
     """
-    Return timetable subjects with the REAL full subject name.
+    Return subjects for a faculty on a particular date.
 
-    ONLY subjects mapped to the selected faculty through
-    faculty_subject_map are returned.
+    NORMAL:
+        Faculty gets subjects from faculty_subject_map + timetable_slots.
 
-    Faculty mapping is matched using:
-        faculty_id
-        selected department
-        selected semester
-        subject_id
-        active status
+    LEAVE:
+        If the logged-in faculty is the original faculty and is on leave
+        for a particular period, that period is removed.
 
-    For 1st / 2nd Semester:
+    SUBSTITUTE:
+        If the logged-in faculty is substitute_faculty_id for a
+        faculty_leave_substitute record, the original subject/period is
+        added for the substitute faculty.
 
-        Timetable department:
-            Actual selected department
-
-        Subject department:
-            Applied Sciences & Humanities
-
-        Architecture Assistantship:
-            Architecture Assistantship
-
-    3rd Semester onward:
-
-        Subject department:
-            Actual selected department
-
-    subject_id:
-        Internal identifier used by attendance/database.
-
-    subject_name:
-        Full subject name displayed in Flutter.
+    IMPORTANT:
+        timetable_slots is NEVER modified.
+        faculty_leave_substitute acts as an override layer.
     """
 
-    # ============================================================
-    # NORMALIZE INPUT
-    # ============================================================
-
-    department = str(
-        department or ""
-    ).strip()
-
-    semester = str(
-        semester or ""
-    ).strip()
-
-    faculty_id = str(
-        faculty_id or ""
-    ).strip()
-
-    if not department:
-        raise HTTPException(
-            status_code=400,
-            detail="Department is required"
-        )
-
-    if not semester:
-        raise HTTPException(
-            status_code=400,
-            detail="Semester is required"
-        )
-
-    if not faculty_id:
-        raise HTTPException(
-            status_code=400,
-            detail="faculty_id is required"
-        )
-
-    # ============================================================
-    # RESOLVE SUBJECT DEPARTMENT
-    # ============================================================
-
-    semester_key = semester.lower().strip()
-
-    first_second_semesters = {
-        "1",
-        "1st",
-        "first",
-        "first semester",
-        "semester 1",
-        "sem 1",
-        "1st semester",
-
-        "2",
-        "2nd",
-        "second",
-        "second semester",
-        "semester 2",
-        "sem 2",
-        "2nd semester",
-    }
-
-    if semester_key in first_second_semesters:
-
-        if (
-            department.lower()
-            == "architecture assistantship".lower()
-        ):
-            subject_department = (
-                "Architecture Assistantship"
-            )
-        else:
-            subject_department = (
-                "Applied Sciences & Humanities"
-            )
-
-    else:
-
-        subject_department = department
-
-    # ============================================================
-    # DEBUG INFORMATION
-    # ============================================================
-
-    print("=" * 80)
-    print("📚 FACULTY SUBJECT API")
-    print(
-        f"Faculty ID          : {faculty_id}"
-    )
-    print(
-        f"Selected Department : {department}"
-    )
-    print(
-        f"Semester            : {semester}"
-    )
-    print(
-        f"Subject Department  : {subject_department}"
-    )
-    print(
-        f"Date                : {date}"
-    )
-    print("=" * 80)
-
-    # ============================================================
-    # DATE VALIDATION
-    # ============================================================
-
-    try:
-
-        parsed_date = datetime.strptime(
-            date,
-            "%Y-%m-%d"
-        ).date()
-
-        if not is_working_day(
-            parsed_date,
-            department,
-            semester
-        ):
-            print(
-                "DEBUG: Holiday or Non-working day "
-                "→ No subjects"
-            )
-            return []
-
-        weekday_short = (
-            parsed_date
-            .strftime("%a")
-            .strip()
-        )
-
-    except ValueError:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid date format"
-        )
-
-    # ============================================================
-    # DATABASE
-    # ============================================================
-
-    conn = connect_db()
+    conn = get_db_connection()
     cur = conn.cursor()
 
     try:
+        # ============================================================
+        # 1. BASIC DATE VALIDATION
+        # ============================================================
+        try:
+            parsed_date = datetime.strptime(
+                date,
+                "%Y-%m-%d"
+            ).date()
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid date format. Use YYYY-MM-DD"
+            )
 
-        cur.execute("""
+        faculty_id = str(faculty_id or "").strip()
+        department = str(department or "").strip()
+        semester = str(semester or "").strip()
+
+        if not faculty_id:
+            return []
+
+        # ============================================================
+        # 2. CHECK WORKING DAY
+        # ============================================================
+        try:
+            if not is_working_day(
+                parsed_date,
+                department,
+                semester
+            ):
+                return []
+        except Exception as e:
+            print(
+                "⚠️ is_working_day check failed:",
+                e
+            )
+
+        weekday_short = parsed_date.strftime("%a").strip()
+
+        # ============================================================
+        # 3. RESOLVE SUBJECT DEPARTMENT
+        #
+        # Keep the same logic used by the existing function.
+        # ============================================================
+        if semester in ("1", "2", "1st", "2nd", "Semester 1", "Semester 2"):
+
+            if department == "Architecture Assistantship":
+                subject_department = "Architecture Assistantship"
+            else:
+                subject_department = "Applied Sciences & Humanities"
+
+        else:
+            subject_department = department
+
+        # ============================================================
+        # 4. GET NORMAL SUBJECTS FOR THIS FACULTY
+        # ============================================================
+        cur.execute(
+            """
             SELECT
                 t.subject_id,
-
                 COALESCE(
-                    NULLIF(
-                        TRIM(s.subject_name),
-                        ''
-                    ),
+                    NULLIF(TRIM(s.subject_name), ''),
+                    NULLIF(TRIM(t.subject_name), ''),
                     t.subject_id
                 ) AS subject_name,
-
                 COALESCE(
-                    NULLIF(
-                        TRIM(s.type),
-                        ''
-                    ),
-                    t.type
-                ) AS type,
-
+                    NULLIF(TRIM(t.type), ''),
+                    NULLIF(TRIM(s.type), ''),
+                    ''
+                ) AS subject_type,
                 STRING_AGG(
-                    DISTINCT t.section,
+                    DISTINCT TRIM(t.section),
                     ','
+                    ORDER BY TRIM(t.section)
                 ) AS sections,
-
                 MIN(t.period_no) AS first_period
-
             FROM timetable_slots t
 
             INNER JOIN faculty_subject_map fsm
+                ON fsm.faculty_id = %s
+               AND fsm.subject_id = t.subject_id
+               AND fsm.department = %s
+               AND fsm.semester = %s
+               AND COALESCE(fsm.active, 1) = 1
 
-                ON LOWER(
-                    TRIM(fsm.faculty_id)
-                )
-                =
-                LOWER(
-                    TRIM(%s)
-                )
+            LEFT JOIN subjects s
+                ON s.subject_id = t.subject_id
 
-                AND LOWER(
-                    TRIM(fsm.subject_id)
-                )
-                =
-                LOWER(
-                    TRIM(t.subject_id)
-                )
-
-                AND LOWER(
-                    TRIM(fsm.department)
-                )
-                =
-                LOWER(
-                    TRIM(%s)
-                )
-
-                AND LOWER(
-                    TRIM(fsm.semester)
-                )
-                =
-                LOWER(
-                    TRIM(%s)
-                )
-
-                AND COALESCE(
-                    LOWER(
-                        TRIM(fsm.status)
-                    ),
-                    'active'
-                ) = 'active'
-
-            LEFT JOIN LATERAL (
-
-                SELECT
-                    sx.subject_name,
-                    sx.type
-
-                FROM subjects sx
-
-                INNER JOIN subject_semester_map sm
-
-                    ON LOWER(
-                        TRIM(sm.subject_id)
-                    )
-                    =
-                    LOWER(
-                        TRIM(sx.subject_id)
-                    )
-
-                WHERE
-
-                    LOWER(
-                        TRIM(sx.subject_id)
-                    )
-                    =
-                    LOWER(
-                        TRIM(t.subject_id)
-                    )
-
-                    AND
-
-                    LOWER(
-                        TRIM(sm.semester)
-                    )
-                    =
-                    LOWER(
-                        TRIM(t.semester)
-                    )
-
-                    AND
-
-                    (
-                        LOWER(
-                            TRIM(
-                                COALESCE(
-                                    sm.department,
-                                    ''
-                                )
-                            )
-                        )
-                        =
-                        LOWER(
-                            TRIM(%s)
-                        )
-
-                        OR
-
-                        COALESCE(
-                            TRIM(sm.department),
-                            ''
-                        ) = ''
-                    )
-
-                    AND COALESCE(
-                        TRIM(sx.subject_name),
-                        ''
-                    ) <> ''
-
-                    AND LOWER(
-                        TRIM(sx.subject_name)
-                    )
-                    <>
-                    LOWER(
-                        TRIM(sx.subject_id)
-                    )
-
-                ORDER BY
-
-                    CASE
-                        WHEN LOWER(
-                            TRIM(
-                                COALESCE(
-                                    sm.department,
-                                    ''
-                                )
-                            )
-                        )
-                        =
-                        LOWER(
-                            TRIM(%s)
-                        )
-                        THEN 0
-                        ELSE 1
-                    END
-
-                LIMIT 1
-
-            ) s ON TRUE
+            LEFT JOIN subject_semester_map ssm
+                ON ssm.subject_id = t.subject_id
+               AND ssm.semester = t.semester
 
             WHERE
-
-                LOWER(
-                    TRIM(t.department)
-                )
-                =
-                LOWER(
-                    TRIM(%s)
-                )
-
-                AND
-
-                LOWER(
-                    TRIM(t.semester)
-                )
-                =
-                LOWER(
-                    TRIM(%s)
-                )
-
-                AND
-
-                LOWER(
-                    TRIM(t.day)
-                )
-                =
-                LOWER(
-                    TRIM(%s)
-                )
+                t.department = %s
+                AND t.semester = %s
+                AND TRIM(t.day) = %s
 
             GROUP BY
                 t.subject_id,
                 s.subject_name,
-                s.type,
-                t.type
+                t.subject_name,
+                t.type,
+                s.type
 
             ORDER BY
-                first_period
-
-        """, (
-
-            # 1. Faculty ID
-            faculty_id,
-
-            # 2. FACULTY MAPPING DEPARTMENT
-            #
-            # IMPORTANT:
-            # This MUST be the selected timetable department.
-            #
-            # Example:
-            # Civil Engineering
-            #
-            department,
-
-            # 3. FACULTY MAPPING SEMESTER
-            semester,
-
-            # 4. SUBJECT SEMESTER MAP DEPARTMENT
-            #
-            # For 1st/2nd semester:
-            # Applied Sciences & Humanities
-            #
-            subject_department,
-
-            # 5. SUBJECT DEPARTMENT PRIORITY
-            subject_department,
-
-            # 6. TIMETABLE DEPARTMENT
-            department,
-
-            # 7. TIMETABLE SEMESTER
-            semester,
-
-            # 8. TIMETABLE DAY
-            weekday_short
-
-        ))
-
-        rows = cur.fetchall()
-
-        print(
-            "📚 FACULTY MAPPED SUBJECTS FOUND:",
-            len(rows)
+                MIN(t.period_no)
+            """,
+            (
+                faculty_id,
+                subject_department,
+                semester,
+                department,
+                semester,
+                weekday_short,
+            )
         )
 
-        # ========================================================
-        # BUILD RESULT
-        # ========================================================
+        normal_rows = cur.fetchall()
 
-        result = []
+        print(
+            "📚 NORMAL FACULTY SUBJECTS FOUND:",
+            len(normal_rows)
+        )
 
-        for r in rows:
+        # ============================================================
+        # 5. CONVERT NORMAL ROWS INTO PERIOD-LEVEL DATA
+        #
+        # We need periods because leave/substitution is period based.
+        # ============================================================
+        normal_periods = []
 
-            subject_id = str(
-                r[0] or ""
+        cur.execute(
+            """
+            SELECT
+                t.subject_id,
+                COALESCE(
+                    NULLIF(TRIM(s.subject_name), ''),
+                    NULLIF(TRIM(t.subject_name), ''),
+                    t.subject_id
+                ) AS subject_name,
+                COALESCE(
+                    NULLIF(TRIM(t.type), ''),
+                    NULLIF(TRIM(s.type), ''),
+                    ''
+                ) AS subject_type,
+                t.period_no,
+                TRIM(COALESCE(t.section, 'ALL')) AS section
+            FROM timetable_slots t
+
+            INNER JOIN faculty_subject_map fsm
+                ON fsm.faculty_id = %s
+               AND fsm.subject_id = t.subject_id
+               AND fsm.department = %s
+               AND fsm.semester = %s
+               AND COALESCE(fsm.active, 1) = 1
+
+            LEFT JOIN subjects s
+                ON s.subject_id = t.subject_id
+
+            WHERE
+                t.department = %s
+                AND t.semester = %s
+                AND TRIM(t.day) = %s
+
+            ORDER BY
+                t.period_no
+            """,
+            (
+                faculty_id,
+                subject_department,
+                semester,
+                department,
+                semester,
+                weekday_short,
+            )
+        )
+
+        for r in cur.fetchall():
+            normal_periods.append({
+                "subject_id": str(r[0] or "").strip(),
+                "subject_name": str(r[1] or "").strip(),
+                "type": str(r[2] or "").strip(),
+                "period_no": r[3],
+                "section": str(r[4] or "ALL").strip(),
+            })
+
+        # ============================================================
+        # 6. GET LEAVE / SUBSTITUTE RECORDS FOR THIS DATE
+        # ============================================================
+        cur.execute(
+            """
+            SELECT
+                department,
+                semester,
+                class_date,
+                period_no,
+                section,
+                subject_id,
+                original_faculty_id,
+                substitute_faculty_id,
+                substitute_subject_id,
+                substitute_faculty_name,
+                substitute_subject_name
+            FROM faculty_leave_substitute
+            WHERE department = %s
+              AND semester = %s
+              AND class_date = %s
+              AND (
+                    original_faculty_id = %s
+                    OR substitute_faculty_id = %s
+                  )
+            ORDER BY period_no
+            """,
+            (
+                department,
+                semester,
+                date,
+                faculty_id,
+                faculty_id,
+            )
+        )
+
+        leave_rows = cur.fetchall()
+
+        print(
+            "🔄 LEAVE/SUBSTITUTE RECORDS FOUND:",
+            len(leave_rows)
+        )
+
+        # ============================================================
+        # 7. REMOVE ORIGINAL FACULTY'S LEAVE PERIODS
+        #
+        # Example:
+        #
+        # XYZ normally has WT P3.
+        # XYZ is on leave P3.
+        #
+        # WT P3 must NOT remain in XYZ's Flutter list.
+        # ============================================================
+        filtered_normal_periods = []
+
+        for item in normal_periods:
+
+            is_on_leave = False
+
+            for lr in leave_rows:
+
+                original_faculty_id = str(
+                    lr[6] or ""
+                ).strip()
+
+                if original_faculty_id != faculty_id:
+                    continue
+
+                leave_period = lr[3]
+
+                leave_section = str(
+                    lr[4] or "ALL"
+                ).strip()
+
+                leave_subject_id = str(
+                    lr[5] or ""
+                ).strip()
+
+                item_section = str(
+                    item["section"] or "ALL"
+                ).strip()
+
+                # Period must match.
+                if leave_period != item["period_no"]:
+                    continue
+
+                # Subject must match.
+                if leave_subject_id != item["subject_id"]:
+                    continue
+
+                # Section:
+                # ALL applies to every section.
+                if (
+                    leave_section != "ALL"
+                    and leave_section != item_section
+                ):
+                    continue
+
+                is_on_leave = True
+                break
+
+            if not is_on_leave:
+                filtered_normal_periods.append(item)
+
+        # ============================================================
+        # 8. ADD SUBSTITUTE PERIODS
+        #
+        # Example:
+        #
+        # Original:
+        #   XYZ → WT → P3
+        #
+        # Substitute:
+        #   ABC
+        #
+        # When ABC logs in:
+        #   WT P3 must appear.
+        # ============================================================
+        substitute_periods = []
+
+        for lr in leave_rows:
+
+            original_faculty_id = str(
+                lr[6] or ""
             ).strip()
 
+            substitute_faculty_id = str(
+                lr[7] or ""
+            ).strip()
+
+            if substitute_faculty_id != faculty_id:
+                continue
+
+            period_no = lr[3]
+
+            section = str(
+                lr[4] or "ALL"
+            ).strip()
+
+            original_subject_id = str(
+                lr[5] or ""
+            ).strip()
+
+            substitute_subject_id = str(
+                lr[8] or ""
+            ).strip()
+
+            substitute_subject_name = str(
+                lr[10] or ""
+            ).strip()
+
+            # --------------------------------------------------------
+            # The attendance subject should remain the ORIGINAL
+            # subject unless a substitute subject has explicitly
+            # been configured.
+            # --------------------------------------------------------
+            display_subject_id = (
+                substitute_subject_id
+                if substitute_subject_id
+                else original_subject_id
+            )
+
+            display_subject_name = (
+                substitute_subject_name
+                if substitute_subject_name
+                else ""
+            )
+
+            # If substitute subject name isn't stored, get it
+            # from subjects table.
+            if not display_subject_name:
+
+                cur.execute(
+                    """
+                    SELECT subject_name
+                    FROM subjects
+                    WHERE subject_id = %s
+                    LIMIT 1
+                    """,
+                    (display_subject_id,)
+                )
+
+                subject_row = cur.fetchone()
+
+                if subject_row:
+                    display_subject_name = str(
+                        subject_row[0] or ""
+                    ).strip()
+
+            if not display_subject_name:
+                display_subject_name = display_subject_id
+
+            # --------------------------------------------------------
+            # Get subject type.
+            # --------------------------------------------------------
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(
+                        NULLIF(TRIM(s.type), ''),
+                        NULLIF(TRIM(t.type), ''),
+                        ''
+                    )
+                FROM subjects s
+                LEFT JOIN timetable_slots t
+                    ON t.subject_id = s.subject_id
+                   AND t.department = %s
+                   AND t.semester = %s
+                   AND t.period_no = %s
+                WHERE s.subject_id = %s
+                LIMIT 1
+                """,
+                (
+                    department,
+                    semester,
+                    period_no,
+                    display_subject_id,
+                )
+            )
+
+            type_row = cur.fetchone()
+
+            subject_type = ""
+
+            if type_row:
+                subject_type = str(
+                    type_row[0] or ""
+                ).strip()
+
+            substitute_periods.append({
+                "subject_id": display_subject_id,
+                "subject_name": display_subject_name,
+                "type": subject_type,
+                "period_no": period_no,
+                "section": section,
+            })
+
+        # ============================================================
+        # 9. COMBINE NORMAL + SUBSTITUTE PERIODS
+        #
+        # A substitute faculty may already have their own normal class.
+        #
+        # Example:
+        #
+        # ABC → CPUC P2     normal
+        # ABC → WT   P3     substitute
+        #
+        # Both must remain.
+        # ============================================================
+        effective_periods = (
+            filtered_normal_periods
+            + substitute_periods
+        )
+
+        # ============================================================
+        # 10. REMOVE EXACT DUPLICATES
+        # ============================================================
+        unique_periods = {}
+
+        for item in effective_periods:
+
+            key = (
+                str(item["subject_id"]),
+                str(item["period_no"]),
+                str(item["section"])
+            )
+
+            unique_periods[key] = item
+
+        effective_periods = list(
+            unique_periods.values()
+        )
+
+        # ============================================================
+        # 11. SORT BY PERIOD
+        # ============================================================
+        effective_periods.sort(
+            key=lambda x: (
+                x["period_no"]
+                if x["period_no"] is not None
+                else 999999
+            )
+        )
+
+        # ============================================================
+        # 12. BUILD FINAL SUBJECT LIST
+        #
+        # Flutter expects:
+        #
+        # subject_id
+        # subject_name
+        # type
+        # sections
+        # ============================================================
+        grouped = {}
+
+        for item in effective_periods:
+
+            subject_id = str(
+                item["subject_id"] or ""
+            ).strip()
+
+            if not subject_id:
+                continue
+
             subject_name = str(
-                r[1] or ""
+                item["subject_name"] or ""
             ).strip()
 
             subject_type = str(
-                r[2] or ""
+                item["type"] or ""
             ).strip()
 
-            sections = (
-                r[3].split(",")
-                if r[3]
-                else []
+            section = str(
+                item["section"] or "ALL"
+            ).strip()
+
+            if subject_id not in grouped:
+
+                grouped[subject_id] = {
+                    "subject_id": subject_id,
+                    "subject_name": subject_name,
+                    "type": subject_type,
+                    "sections": [],
+                    "_first_period": item["period_no"],
+                }
+
+            if section not in grouped[subject_id]["sections"]:
+                grouped[subject_id]["sections"].append(section)
+
+            # Keep earliest period for sorting.
+            current_first = grouped[
+                subject_id
+            ].get("_first_period")
+
+            if (
+                current_first is None
+                or (
+                    item["period_no"] is not None
+                    and item["period_no"] < current_first
+                )
+            ):
+                grouped[
+                    subject_id
+                ]["_first_period"] = item["period_no"]
+
+        # ============================================================
+        # 13. SORT SUBJECTS BY FIRST PERIOD
+        # ============================================================
+        result = list(grouped.values())
+
+        result.sort(
+            key=lambda x: (
+                x.get("_first_period")
+                if x.get("_first_period") is not None
+                else 999999
             )
+        )
 
-            clean_sections = [
-                s.strip()
-                for s in sections
-                if s and s.strip()
-            ]
+        # Remove internal field before returning to Flutter.
+        for item in result:
+            item.pop("_first_period", None)
 
+        print(
+            "📚 EFFECTIVE FACULTY SUBJECTS:",
+            len(result)
+        )
+
+        for item in result:
             print(
-                "📚 FACULTY SUBJECT → "
-                f"Faculty={faculty_id} | "
-                f"ID={subject_id} | "
-                f"NAME={subject_name} | "
-                f"TYPE={subject_type} | "
-                f"SECTIONS={clean_sections}"
+                "   →",
+                item["subject_id"],
+                item["subject_name"],
+                item["sections"]
             )
-
-            result.append({
-                "subject_id": subject_id,
-                "subject_name": subject_name,
-                "type": subject_type,
-                "sections": clean_sections
-            })
 
         return result
 
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print(
+            "❌ get_subjects_by_date error:",
+            repr(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load subjects: {str(e)}"
+        )
+
     finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
 
-        release_db(conn)
-
+        try:
+            conn.close()
+        except Exception:
+            pass
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
 # ======================================================
