@@ -2699,6 +2699,7 @@ def get_subjects_by_date(
 
         # ============================================================
         # 6. GET LEAVE / SUBSTITUTE RECORDS FOR THIS DATE
+        #    🔥 ROBUST MATCHING
         # ============================================================
         cur.execute(
             """
@@ -2717,22 +2718,22 @@ def get_subjects_by_date(
 
             FROM faculty_leave_substitute
 
-            WHERE department = %s
-              AND semester = %s
-              AND class_date = %s
+            WHERE LOWER(TRIM(department)) = LOWER(TRIM(%s))
+            AND LOWER(TRIM(semester)) = LOWER(TRIM(%s))
+            AND class_date::date = %s
 
-              AND (
-                    original_faculty_id = %s
-                    OR substitute_faculty_id = %s
-                  )
+            AND (
+                    LOWER(TRIM(original_faculty_id)) = LOWER(TRIM(%s))
+                    OR
+                    LOWER(TRIM(substitute_faculty_id)) = LOWER(TRIM(%s))
+            )
 
-            ORDER BY
-                period_no
+            ORDER BY period_no
             """,
             (
                 department,
                 semester,
-                date,
+                parsed_date,
                 faculty_id,
                 faculty_id,
             )
@@ -2740,10 +2741,26 @@ def get_subjects_by_date(
 
         leave_rows = cur.fetchall()
 
-        print(
-            "🔄 LEAVE/SUBSTITUTE RECORDS FOUND:",
-            len(leave_rows)
-        )
+        print("\n" + "=" * 80)
+        print("🔄 LEAVE/SUBSTITUTE DEBUG")
+        print("=" * 80)
+        print("Department :", department)
+        print("Semester   :", semester)
+        print("Date       :", parsed_date)
+        print("Faculty ID :", faculty_id)
+        print("Records    :", len(leave_rows))
+
+        for lr in leave_rows:
+            print(
+                "   → Period:", lr[3],
+                "| Section:", lr[4],
+                "| Subject:", lr[5],
+                "| Original:", lr[6],
+                "| Substitute:", lr[7],
+                "| Sub Subject:", lr[8],
+            )
+
+        print("=" * 80)
 
         # ============================================================
         # 7. REMOVE ORIGINAL FACULTY'S LEAVE PERIODS
