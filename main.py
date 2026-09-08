@@ -1544,44 +1544,201 @@ def startup():
 # LOGIN
 # ======================================================
 
+# ======================================================
+# LOGIN
+# ======================================================
+
 @app.post("/login")
 def login(data: LoginModel):
+
+    username = str(data.username or "").strip()
+
+    if not username:
+        raise HTTPException(
+            status_code=400,
+            detail="Username is required"
+        )
 
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT
-            u.username,
-            u.password,
-            u.role,
-            u.active,
-            f.faculty_id
-        FROM users u
-        LEFT JOIN faculty f
-            ON LOWER(TRIM(f.username)) = LOWER(TRIM(u.username))
-        WHERE u.username=%s
-    """, (data.username,))
+    try:
 
-    user = cur.fetchone()
-    release_db(conn)
+        # ==================================================
+        # STEP 1: FIND USER ACCOUNT
+        # ==================================================
 
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid Username")
+        cur.execute("""
+            SELECT
+                username,
+                password,
+                role,
+                active
+            FROM users
+            WHERE LOWER(TRIM(username))
+                  = LOWER(TRIM(%s))
+            LIMIT 1
+        """, (username,))
 
-    if user[3] == 0:
-        raise HTTPException(status_code=403, detail="Account Disabled")
+        user = cur.fetchone()
 
-    if not verify_password(data.password, user[1]):
-        raise HTTPException(status_code=401, detail="Invalid Password")
+        if not user:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid Username"
+            )
 
-    return {
-        "status": "success",
-        "username": user[0],
-        "role": user[2],
-        "faculty_id": user[4]
-    }
+        db_username = str(user[0] or "").strip()
+        stored_password = user[1]
+        role = user[2]
+        active = user[3]
 
+        # ==================================================
+        # STEP 2: ACCOUNT STATUS
+        # ==================================================
+
+        if active == 0:
+            raise HTTPException(
+                status_code=403,
+                detail="Account Disabled"
+            )
+
+        # ==================================================
+        # STEP 3: PASSWORD
+        # ==================================================
+
+        if not verify_password(
+            data.password,
+            stored_password
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid Password"
+            )
+
+        # ==================================================
+        # STEP 4: RESOLVE FACULTY ID
+        #
+        # First:
+        #     faculty.username = login username
+        #
+        # Fallback:
+        #     faculty.faculty_id = login username
+        #
+        # Therefore:
+        #
+        # CSE03 -> CSE03
+        #
+        # sh.1 -> faculty row whose username is sh.1
+        # ==================================================
+
+        faculty_id = None
+
+        # --------------------------------------------------
+        # TRY FACULTY USERNAME
+        # --------------------------------------------------
+
+        cur.execute("""
+            SELECT faculty_id
+            FROM faculty
+            WHERE LOWER(TRIM(username))
+                  = LOWER(TRIM(%s))
+            LIMIT 1
+        """, (db_username,))
+
+        faculty_row = cur.fetchone()
+
+        if faculty_row and faculty_row[0]:
+
+            faculty_id = str(
+                faculty_row[0]
+            ).strip()
+
+        # --------------------------------------------------
+        # FALLBACK:
+        # LOGIN USERNAME = FACULTY ID
+        # --------------------------------------------------
+
+        if not faculty_id:
+
+            cur.execute("""
+                SELECT faculty_id
+                FROM faculty
+                WHERE LOWER(TRIM(faculty_id))
+                      = LOWER(TRIM(%s))
+                LIMIT 1
+            """, (db_username,))
+
+            faculty_row = cur.fetchone()
+
+            if faculty_row and faculty_row[0]:
+
+                faculty_id = str(
+                    faculty_row[0]
+                ).strip()
+
+        # ==================================================
+        # DEBUG LOG
+        # ==================================================
+
+        print("\n" + "=" * 70)
+        print("🔐 FACULTY LOGIN")
+        print(
+            f"   Login username : {db_username}"
+        )
+        print(
+            f"   Role            : {role}"
+        )
+        print(
+            f"   Faculty ID      : {faculty_id}"
+        )
+        print("=" * 70)
+
+        # ==================================================
+        # FACULTY MUST HAVE A FACULTY ID
+        # ==================================================
+
+        if str(role).lower().strip() == "faculty":
+
+            if not faculty_id:
+
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Faculty account is not linked "
+                        "to a faculty record. "
+                        f"Username={db_username}"
+                    )
+                )
+
+        # ==================================================
+        # LOGIN RESPONSE
+        # ==================================================
+
+        return {
+            "status": "success",
+            "username": db_username,
+            "role": role,
+            "faculty_id": faculty_id
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print(
+            "❌ LOGIN ERROR:",
+            e
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Login failed: {str(e)}"
+        )
+
+    finally:
+        release_db(conn)
 # ======================================================
 # FACULTY WORKLOAD
 # Returns ONLY departments and semesters assigned
@@ -1992,28 +2149,35 @@ def sync_timetable(records: list = Body(...)):
 
     try:
 
-        # --------------------------------------------------
-        # Ensure table exists (fresh cloud safety)
-        # --------------------------------------------------
+        # ======================================================
+        # FACULTY TABLE
+        # ======================================================
+
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS timetable_slots(
-            id SERIAL PRIMARY KEY,
-            department TEXT NOT NULL,
-            semester TEXT NOT NULL,
-            section TEXT NOT NULL,
-            day TEXT NOT NULL,
-            period_no INTEGER NOT NULL,
-            period_len INTEGER,
-            type TEXT,
-            subject_id TEXT,
-            faculty_id TEXT,
-            room TEXT,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            version INTEGER DEFAULT 1,
-            sync_pending INTEGER DEFAULT 0,
-            UNIQUE(department,semester,section,day,period_no)
-        )
+            CREATE TABLE IF NOT EXISTS faculty(
+                faculty_id TEXT PRIMARY KEY,
+                name TEXT,
+                department TEXT,
+                mobile TEXT,
+                email TEXT,
+                designation TEXT,
+                username TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                version INTEGER DEFAULT 1,
+                is_deleted INTEGER DEFAULT 0
+            )
         """)
+
+        # ------------------------------------------------------
+        # SAFE FACULTY USERNAME COLUMN MIGRATION
+        # ------------------------------------------------------
+
+        cur.execute("""
+            ALTER TABLE faculty
+            ADD COLUMN IF NOT EXISTS username TEXT
+        """)
+
+        print("✅ Faculty username column verified")
 
         # --------------------------------------------------
         # Normalize records
