@@ -2241,7 +2241,7 @@ def get_subjects_by_date(
         faculty_leave_substitute acts as an override layer.
     """
 
-    conn = get_db_connection()
+    conn = connect_db()
     cur = conn.cursor()
 
     try:
