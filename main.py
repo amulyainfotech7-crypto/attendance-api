@@ -1604,23 +1604,38 @@ def get_faculty_workload(faculty_id: str):
 
     try:
 
+        # ======================================================
+        # AUTHORITATIVE SOURCE:
+        # timetable_slots
+        #
+        # This ensures EVERY faculty gets workload according
+        # to the actual timetable, regardless of whether
+        # faculty_subject_map is correctly populated.
+        # ======================================================
+
         cur.execute("""
             SELECT DISTINCT
-                department,
-                semester
-            FROM faculty_subject_map
-            WHERE LOWER(TRIM(faculty_id))
+                TRIM(t.department) AS department,
+                TRIM(t.semester) AS semester
+            FROM timetable_slots t
+            WHERE LOWER(TRIM(t.faculty_id))
                   = LOWER(TRIM(%s))
-              AND COALESCE(LOWER(TRIM(status)), 'active')
-                  = 'active'
-              AND department IS NOT NULL
-              AND TRIM(department) <> ''
-              AND semester IS NOT NULL
-              AND TRIM(semester) <> ''
+
+              AND t.faculty_id IS NOT NULL
+              AND TRIM(t.faculty_id) <> ''
+
+              AND t.department IS NOT NULL
+              AND TRIM(t.department) <> ''
+
+              AND t.semester IS NOT NULL
+              AND TRIM(t.semester) <> ''
+
             ORDER BY
-                department,
-                semester
-        """, (faculty_id,))
+                TRIM(t.department),
+                TRIM(t.semester)
+        """, (
+            faculty_id,
+        ))
 
         rows = cur.fetchall()
 
@@ -1654,12 +1669,14 @@ def get_faculty_workload(faculty_id: str):
 
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to load faculty workload: {str(e)}"
+            detail=(
+                "Failed to load faculty workload: "
+                f"{str(e)}"
+            )
         )
 
     finally:
         release_db(conn)
-
 
 # ======================================================
 # GET DEPARTMENTS
