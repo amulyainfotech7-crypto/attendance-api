@@ -2807,6 +2807,34 @@ def get_subjects_by_date(
             len(normal_periods)
         )
 
+        # ------------------------------------------------------------
+        # DEBUG: show the exact NORMAL subjects returned for this date.
+        # This makes it immediately clear whether the substitute faculty's
+        # own normal subject is present independently of the leave record.
+        # ------------------------------------------------------------
+        if normal_periods:
+            print("📘 NORMAL SUBJECTS FOR THIS DATE:")
+            for np_item in normal_periods:
+                print(
+                    "   →",
+                    np_item.get("subject_name", ""),
+                    "(",
+                    np_item.get("subject_id", ""),
+                    ")",
+                    "| Period:",
+                    np_item.get("period_no"),
+                    "| Section:",
+                    np_item.get("section"),
+                    "| is_substitute=False",
+                )
+        else:
+            print(
+                "⚠️ NO NORMAL TIMETABLE PERIOD FOUND FOR FACULTY:",
+                faculty_id,
+                "| Date:",
+                parsed_date,
+            )
+
         # ============================================================
         # 6. GET LEAVE / SUBSTITUTE RECORDS
         #
