@@ -2394,6 +2394,11 @@ def get_timetable(department: str, semester: str, day: str):
 # SUBJECTS BY DATE
 # FACULTY MAPPED SUBJECTS ONLY
 # ======================================================
+# ======================================================
+# SUBJECTS BY DATE
+# EFFECTIVE FACULTY SUBJECTS
+# NORMAL + LEAVE + SUBSTITUTE
+# ======================================================
 
 @app.get("/subjects-by-date")
 def get_subjects_by_date(
@@ -2405,27 +2410,101 @@ def get_subjects_by_date(
     """
     Return EFFECTIVE subjects for a faculty on a particular date.
 
-    NORMAL:
-        Faculty gets subjects from faculty_subject_map + timetable_slots.
+    ============================================================
+    NORMAL
+    ============================================================
 
-    LEAVE:
-        If the logged-in faculty is the original faculty and is on leave
-        for a particular period, that period is removed.
+    Faculty gets normal subjects from:
 
-    SUBSTITUTE:
-        If the logged-in faculty is substitute_faculty_id for a
-        faculty_leave_substitute record, the original subject/period
-        is added for the substitute faculty.
+        faculty_subject_map
+                    +
+        timetable_slots
 
-        Substitute subjects are returned with:
-            "is_substitute": True
+    ============================================================
+    LEAVE
+    ============================================================
 
-        Normal subjects are returned with:
-            "is_substitute": False
+    If the logged-in faculty is the original faculty and
+    that faculty is on leave for a particular period/section,
+    that normal period is removed.
+
+    ============================================================
+    SUBSTITUTE
+    ============================================================
+
+    If the logged-in faculty is the substitute_faculty_id
+    for a faculty_leave_substitute record, the ORIGINAL
+    faculty's subject/period/section is added.
 
     IMPORTANT:
-        timetable_slots is NEVER modified.
-        faculty_leave_substitute acts as an override layer.
+
+        The substitute teaches the ORIGINAL class.
+
+    Therefore:
+
+        original subject_id
+        original subject_name
+
+    are returned for the substitute attendance entry.
+
+    substitute_subject_id is NOT used to replace the
+    original subject.
+
+    ============================================================
+    SUBSTITUTE FLAG
+    ============================================================
+
+    Normal:
+
+        "is_substitute": False
+
+    Substitute:
+
+        "is_substitute": True
+
+    Flutter can therefore display:
+
+        Normal:
+            Physics (PHY1)
+
+        Substitute:
+            *Physics (PHY1)
+
+    ============================================================
+    IMPORTANT
+    ============================================================
+
+    timetable_slots is NEVER modified.
+
+    faculty_leave_substitute acts only as an
+    effective timetable override layer.
+
+    ============================================================
+    CRITICAL DUPLICATE RULE
+    ============================================================
+
+    A faculty can have:
+
+        Physics P2  -> NORMAL
+        Physics P3  -> SUBSTITUTE
+
+    Even though both have the same subject_id,
+
+        PHY1
+
+    they MUST remain two separate attendance entries.
+
+    Therefore the logical identity includes:
+
+        subject_id
+        period_no
+        section
+        is_substitute
+
+    and final grouping includes:
+
+        subject_id
+        is_substitute
     """
 
     conn = connect_db()
@@ -2436,6 +2515,7 @@ def get_subjects_by_date(
         # ============================================================
         # 1. BASIC DATE VALIDATION
         # ============================================================
+
         try:
             parsed_date = datetime.strptime(
                 date,
@@ -2447,6 +2527,10 @@ def get_subjects_by_date(
                 status_code=400,
                 detail="Invalid date format. Use YYYY-MM-DD"
             )
+
+        # ------------------------------------------------------------
+        # NORMALIZE INPUTS
+        # ------------------------------------------------------------
 
         faculty_id = str(
             faculty_id or ""
@@ -2460,12 +2544,17 @@ def get_subjects_by_date(
             semester or ""
         ).strip()
 
+        # ------------------------------------------------------------
+        # FACULTY ID IS REQUIRED
+        # ------------------------------------------------------------
+
         if not faculty_id:
             return []
 
         # ============================================================
         # 2. CHECK WORKING DAY
         # ============================================================
+
         try:
 
             if not is_working_day(
@@ -2473,6 +2562,11 @@ def get_subjects_by_date(
                 department,
                 semester
             ):
+                print(
+                    "📅 Non-working day:",
+                    parsed_date
+                )
+
                 return []
 
         except Exception as e:
@@ -2482,13 +2576,10 @@ def get_subjects_by_date(
                 e
             )
 
-        weekday_short = parsed_date.strftime(
-            "%a"
-        ).strip()
-
         # ============================================================
         # 3. RESOLVE SUBJECT DEPARTMENT
         # ============================================================
+
         if semester in (
             "1",
             "2",
@@ -2515,8 +2606,12 @@ def get_subjects_by_date(
             subject_department = department
 
         # ============================================================
-        # 4. GET NORMAL SUBJECTS FOR THIS FACULTY
+        # 4. GET NORMAL SUBJECTS
+        #
+        # This query is kept for compatibility/debugging.
+        # The actual period-level records are loaded below.
         # ============================================================
+
         cur.execute(
             """
             SELECT
@@ -2587,7 +2682,7 @@ def get_subjects_by_date(
                 semester,
                 department,
                 semester,
-                weekday_short,
+                parsed_date.strftime("%a").strip(),
             )
         )
 
@@ -2599,12 +2694,20 @@ def get_subjects_by_date(
         )
 
         # ============================================================
-        # 5. CONVERT NORMAL TIMETABLE INTO PERIOD-LEVEL DATA
+        # 5. GET NORMAL SUBJECTS AT PERIOD LEVEL
         #
-        # We need period-level information because leave/substitution
-        # is period + section based.
+        # IMPORTANT:
+        #
+        # Leave/substitution is period + section based.
+        #
+        # Therefore we must NOT use only a subject-level query.
         # ============================================================
+
         normal_periods = []
+
+        weekday_short = parsed_date.strftime(
+            "%a"
+        ).strip()
 
         cur.execute(
             """
@@ -2671,7 +2774,9 @@ def get_subjects_by_date(
             )
         )
 
-        for r in cur.fetchall():
+        normal_db_rows = cur.fetchall()
+
+        for r in normal_db_rows:
 
             normal_periods.append({
 
@@ -2693,14 +2798,29 @@ def get_subjects_by_date(
                     r[4] or "ALL"
                 ).strip(),
 
-                # NORMAL SUBJECT
+                # NORMAL
                 "is_substitute": False,
             })
 
+        print(
+            "📚 NORMAL PERIOD RECORDS:",
+            len(normal_periods)
+        )
+
         # ============================================================
-        # 6. GET LEAVE / SUBSTITUTE RECORDS FOR THIS DATE
-        #    🔥 ROBUST MATCHING
+        # 6. GET LEAVE / SUBSTITUTE RECORDS
+        #
+        # We retrieve records where the logged-in faculty is either:
+        #
+        #   original_faculty_id
+        #
+        # OR
+        #
+        #   substitute_faculty_id
+        #
+        # for the selected date.
         # ============================================================
+
         cur.execute(
             """
             SELECT
@@ -2718,17 +2838,26 @@ def get_subjects_by_date(
 
             FROM faculty_leave_substitute
 
-            WHERE LOWER(TRIM(department)) = LOWER(TRIM(%s))
-            AND LOWER(TRIM(semester)) = LOWER(TRIM(%s))
-            AND class_date::date = %s
+            WHERE LOWER(TRIM(department))
+                    = LOWER(TRIM(%s))
 
-            AND (
-                    LOWER(TRIM(original_faculty_id)) = LOWER(TRIM(%s))
+              AND LOWER(TRIM(semester))
+                    = LOWER(TRIM(%s))
+
+              AND class_date::date = %s
+
+              AND (
+                    LOWER(TRIM(original_faculty_id))
+                        = LOWER(TRIM(%s))
+
                     OR
-                    LOWER(TRIM(substitute_faculty_id)) = LOWER(TRIM(%s))
-            )
 
-            ORDER BY period_no
+                    LOWER(TRIM(substitute_faculty_id))
+                        = LOWER(TRIM(%s))
+              )
+
+            ORDER BY
+                period_no
             """,
             (
                 department,
@@ -2741,23 +2870,55 @@ def get_subjects_by_date(
 
         leave_rows = cur.fetchall()
 
-        print("\n" + "=" * 80)
-        print("🔄 LEAVE/SUBSTITUTE DEBUG")
+        # ============================================================
+        # DEBUG
+        # ============================================================
+
+        print()
         print("=" * 80)
-        print("Department :", department)
-        print("Semester   :", semester)
-        print("Date       :", parsed_date)
-        print("Faculty ID :", faculty_id)
-        print("Records    :", len(leave_rows))
+        print("🔄 LEAVE / SUBSTITUTE DEBUG")
+        print("=" * 80)
+
+        print(
+            "Department :",
+            department
+        )
+
+        print(
+            "Semester   :",
+            semester
+        )
+
+        print(
+            "Date       :",
+            parsed_date
+        )
+
+        print(
+            "Faculty ID :",
+            faculty_id
+        )
+
+        print(
+            "Records    :",
+            len(leave_rows)
+        )
 
         for lr in leave_rows:
+
             print(
-                "   → Period:", lr[3],
-                "| Section:", lr[4],
-                "| Subject:", lr[5],
-                "| Original:", lr[6],
-                "| Substitute:", lr[7],
-                "| Sub Subject:", lr[8],
+                "   → Period:",
+                lr[3],
+                "| Section:",
+                lr[4],
+                "| Subject:",
+                lr[5],
+                "| Original:",
+                lr[6],
+                "| Substitute:",
+                lr[7],
+                "| Sub Subject:",
+                lr[8],
             )
 
         print("=" * 80)
@@ -2767,21 +2928,36 @@ def get_subjects_by_date(
         #
         # Example:
         #
-        # Faculty A:
-        #     Applied Chemistry Lab P3
+        # Math faculty:
         #
-        # Leave record:
-        #     original_faculty_id = A
+        #     Mathematics P3
+        #
+        # Leave:
+        #
+        #     original_faculty_id = MATH01
         #     period_no = 3
         #
-        # Result:
-        #     Applied Chemistry Lab P3 is REMOVED from A.
+        # Result for Math faculty:
+        #
+        #     Mathematics P3 is removed.
+        #
         # ============================================================
+
         filtered_normal_periods = []
 
         for item in normal_periods:
 
             is_on_leave = False
+
+            item_subject_id = str(
+                item["subject_id"] or ""
+            ).strip()
+
+            item_section = str(
+                item["section"] or "ALL"
+            ).strip()
+
+            item_period = item["period_no"]
 
             for lr in leave_rows:
 
@@ -2789,9 +2965,11 @@ def get_subjects_by_date(
                     lr[6] or ""
                 ).strip()
 
-                # This leave record belongs to another
-                # original faculty.
-                if original_faculty_id != faculty_id:
+                # ----------------------------------------------------
+                # This leave record belongs to another faculty.
+                # ----------------------------------------------------
+
+                if original_faculty_id.lower() != faculty_id.lower():
                     continue
 
                 leave_period = lr[3]
@@ -2804,39 +2982,58 @@ def get_subjects_by_date(
                     lr[5] or ""
                 ).strip()
 
-                item_section = str(
-                    item["section"] or "ALL"
-                ).strip()
-
                 # ----------------------------------------------------
                 # PERIOD MUST MATCH
                 # ----------------------------------------------------
-                if leave_period != item["period_no"]:
+
+                if leave_period != item_period:
                     continue
 
                 # ----------------------------------------------------
                 # SUBJECT MUST MATCH
                 # ----------------------------------------------------
-                if leave_subject_id != item["subject_id"]:
+
+                if leave_subject_id.lower() != item_subject_id.lower():
                     continue
 
                 # ----------------------------------------------------
                 # SECTION
                 #
-                # ALL = every section
+                # ALL means every section.
                 # Otherwise exact section match.
                 # ----------------------------------------------------
+
                 if (
-                    leave_section != "ALL"
-                    and leave_section != item_section
+                    leave_section.upper() != "ALL"
+                    and leave_section.upper() != item_section.upper()
                 ):
                     continue
 
+                # ----------------------------------------------------
+                # THIS NORMAL PERIOD IS ON LEAVE
+                # ----------------------------------------------------
+
                 is_on_leave = True
+
+                print(
+                    "🚫 REMOVING LEAVE PERIOD:",
+                    item["subject_name"],
+                    "| Subject:",
+                    item_subject_id,
+                    "| Period:",
+                    item_period,
+                    "| Section:",
+                    item_section,
+                    "| Faculty:",
+                    faculty_id,
+                )
 
                 break
 
-            # Keep only periods for which the faculty is NOT on leave.
+            # --------------------------------------------------------
+            # Keep only periods for which faculty is NOT on leave.
+            # --------------------------------------------------------
+
             if not is_on_leave:
 
                 filtered_normal_periods.append(
@@ -2851,20 +3048,46 @@ def get_subjects_by_date(
         # ============================================================
         # 8. ADD SUBSTITUTE PERIODS
         #
+        # CRITICAL RULE:
+        #
+        # The substitute faculty teaches the ORIGINAL faculty's class.
+        #
+        # Therefore we ALWAYS use:
+        #
+        #     lr[5] = original subject_id
+        #
+        # and NOT:
+        #
+        #     lr[8] = substitute_subject_id
+        #
+        # Even if substitute_subject_id exists.
+        #
         # Example:
         #
-        # Original:
-        #     Faculty A → Applied Chemistry Lab → P3
+        # Math faculty:
         #
-        # Substitute:
-        #     Faculty B
+        #     Mathematics P3
         #
-        # When Faculty B logs in:
+        # Physics faculty:
         #
-        #     *Applied Chemistry Lab (Lab)
+        #     Physics P2 NORMAL
         #
-        # is returned.
+        # Leave/substitute:
+        #
+        #     Math → P3 → Physics faculty
+        #
+        # Physics result:
+        #
+        #     Physics P2 NORMAL
+        #     Mathematics P3 SUBSTITUTE
+        #
+        # Flutter:
+        #
+        #     Physics (PHY1)
+        #     *Mathematics (MATH1)
+        #
         # ============================================================
+
         substitute_periods = []
 
         for lr in leave_rows:
@@ -2878,10 +3101,10 @@ def get_subjects_by_date(
             ).strip()
 
             # --------------------------------------------------------
-            # Only add this record if the logged-in faculty
-            # is the assigned substitute.
+            # Only the assigned substitute gets this entry.
             # --------------------------------------------------------
-            if substitute_faculty_id != faculty_id:
+
+            if substitute_faculty_id.lower() != faculty_id.lower():
                 continue
 
             period_no = lr[3]
@@ -2890,64 +3113,67 @@ def get_subjects_by_date(
                 lr[4] or "ALL"
             ).strip()
 
+            # --------------------------------------------------------
+            # ORIGINAL SUBJECT
+            #
+            # This is the subject the substitute is actually teaching.
+            # --------------------------------------------------------
+
             original_subject_id = str(
                 lr[5] or ""
             ).strip()
 
-            substitute_subject_id = str(
-                lr[8] or ""
-            ).strip()
-
-            substitute_subject_name = str(
-                lr[10] or ""
-            ).strip()
-
-            # --------------------------------------------------------
-            # SUBJECT TO SHOW
-            #
-            # Normally we want the ORIGINAL subject because the
-            # substitute is covering the original class.
-            #
-            # If substitute_subject_id was explicitly configured,
-            # use that subject instead.
-            # --------------------------------------------------------
-            display_subject_id = (
-                substitute_subject_id
-                if substitute_subject_id
-                else original_subject_id
-            )
-
-            display_subject_name = (
-                substitute_subject_name
-                if substitute_subject_name
-                else ""
-            )
-
-            # --------------------------------------------------------
-            # If subject name is not stored in the substitution
-            # record, fetch it from subjects.
-            # --------------------------------------------------------
-            if not display_subject_name:
-
-                cur.execute(
-                    """
-                    SELECT subject_name
-                    FROM subjects
-                    WHERE subject_id = %s
-                    LIMIT 1
-                    """,
-                    (
-                        display_subject_id,
-                    )
+            if not original_subject_id:
+                print(
+                    "⚠️ SUBSTITUTE RECORD SKIPPED:"
+                    " original subject_id is empty"
                 )
+                continue
 
-                subject_row = cur.fetchone()
+            # --------------------------------------------------------
+            # DO NOT use substitute_subject_id here.
+            #
+            # substitute_subject_id is NOT the attendance subject
+            # for this adjusted period.
+            # --------------------------------------------------------
 
-                if subject_row:
+            display_subject_id = (
+                original_subject_id
+            )
 
-                    display_subject_name = str(
-                        subject_row[0] or ""
-                    ).strip()
+            # --------------------------------------------------------
+            # GET ORIGINAL SUBJECT NAME
+            # --------------------------------------------------------
+
+            display_subject_name = ""
+
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(
+                        NULLIF(TRIM(subject_name), ''),
+                        subject_id
+                    )
+                FROM subjects
+                WHERE subject_id = %s
+                LIMIT 1
+                """,
+                (
+                    display_subject_id,
+                )
+            )
+
+            subject_row = cur.fetchone()
+
+            if subject_row:
+
+                display_subject_name = str(
+                    subject_row[0] or ""
+                ).strip()
+
+            # --------------------------------------------------------
+            # FALLBACK
+            # --------------------------------------------------------
 
             if not display_subject_name:
 
@@ -2955,9 +3181,12 @@ def get_subjects_by_date(
                     display_subject_id
                 )
 
-            # --------------------------------------------------------
-            # GET SUBJECT TYPE
-            # --------------------------------------------------------
+            # ========================================================
+            # GET ORIGINAL SUBJECT TYPE
+            # ========================================================
+
+            subject_type = ""
+
             cur.execute(
                 """
                 SELECT
@@ -2966,7 +3195,6 @@ def get_subjects_by_date(
                         NULLIF(TRIM(t.type), ''),
                         ''
                     )
-
                 FROM subjects s
 
                 LEFT JOIN timetable_slots t
@@ -2989,17 +3217,16 @@ def get_subjects_by_date(
 
             type_row = cur.fetchone()
 
-            subject_type = ""
-
             if type_row:
 
                 subject_type = str(
                     type_row[0] or ""
                 ).strip()
 
-            # --------------------------------------------------------
+            # ========================================================
             # ADD SUBSTITUTE PERIOD
-            # --------------------------------------------------------
+            # ========================================================
+
             substitute_periods.append({
 
                 "subject_id":
@@ -3017,7 +3244,7 @@ def get_subjects_by_date(
                 "section":
                     section,
 
-                # ⭐ THIS IS THE IMPORTANT FLAG
+                # ⭐ IMPORTANT
                 "is_substitute":
                     True,
             })
@@ -3025,6 +3252,8 @@ def get_subjects_by_date(
             print(
                 "⭐ SUBSTITUTE PERIOD:",
                 display_subject_name,
+                "| Subject ID:",
+                display_subject_id,
                 "| Period:",
                 period_no,
                 "| Section:",
@@ -3032,114 +3261,79 @@ def get_subjects_by_date(
                 "| Original Faculty:",
                 original_faculty_id,
                 "| Substitute Faculty:",
-                substitute_faculty_id
+                substitute_faculty_id,
+                "| is_substitute=True",
             )
 
         # ============================================================
         # 9. COMBINE NORMAL + SUBSTITUTE
         #
-        # IMPORTANT:
+        # A substitute faculty may have:
         #
-        # A substitute faculty can have their own normal class
-        # AND a substitute class.
+        #     NORMAL class
         #
-        # Example:
+        # and
         #
-        # P2 → CPUC       NORMAL
-        # P3 → Chemistry  SUBSTITUTE
+        #     SUBSTITUTE class
         #
-        # Both must be returned.
+        # at different periods.
+        #
+        # BOTH must remain.
         # ============================================================
+
         effective_periods = (
             filtered_normal_periods
-            + substitute_periods
+            +
+            substitute_periods
+        )
+
+        print(
+            "📚 TOTAL EFFECTIVE PERIOD RECORDS:",
+            len(effective_periods)
         )
 
         # ============================================================
-        # 10. REMOVE EXACT DUPLICATES
+        # 10. REMOVE TRUE DUPLICATES
+        #
+        # IMPORTANT:
+        #
+        # NORMAL and SUBSTITUTE are NOT duplicates.
+        #
+        # Therefore is_substitute is part of the key.
+        #
+        # Example:
+        #
+        #     PHY1 / P2 / A / False
+        #
+        # and
+        #
+        #     PHY1 / P3 / A / True
+        #
+        # are different records.
+        #
+        # Even if the period happens to be the same:
+        #
+        #     PHY1 / P3 / A / False
+        #
+        #     PHY1 / P3 / A / True
+        #
+        # they are still separate attendance makers.
         # ============================================================
+
         unique_periods = {}
 
         for item in effective_periods:
 
-            key = (
-                str(
-                    item["subject_id"]
-                ),
-
-                str(
-                    item["period_no"]
-                ),
-
-                str(
-                    item["section"]
-                )
-            )
-
-            # If a substitute entry exists, keep the substitute
-            # flag rather than accidentally replacing it with normal.
-            if key in unique_periods:
-
-                if item.get(
-                    "is_substitute",
-                    False
-                ):
-
-                    unique_periods[key] = item
-
-            else:
-
-                unique_periods[key] = item
-
-        effective_periods = list(
-            unique_periods.values()
-        )
-
-        # ============================================================
-        # 11. SORT BY PERIOD
-        # ============================================================
-        effective_periods.sort(
-            key=lambda x: (
-                x["period_no"]
-                if x["period_no"] is not None
-                else 999999
-            )
-        )
-
-        # ============================================================
-        # 12. BUILD FINAL SUBJECT LIST
-        #
-        # Flutter receives:
-        #
-        # {
-        #     subject_id,
-        #     subject_name,
-        #     type,
-        #     sections,
-        #     is_substitute
-        # }
-        # ============================================================
-        grouped = {}
-
-        for item in effective_periods:
-
             subject_id = str(
-                item["subject_id"] or ""
+                item.get("subject_id") or ""
             ).strip()
 
-            if not subject_id:
-                continue
-
-            subject_name = str(
-                item["subject_name"] or ""
-            ).strip()
-
-            subject_type = str(
-                item["type"] or ""
-            ).strip()
+            period_no = item.get(
+                "period_no"
+            )
 
             section = str(
-                item["section"] or "ALL"
+                item.get("section") or "ALL"
             ).strip()
 
             is_substitute = bool(
@@ -3149,9 +3343,147 @@ def get_subjects_by_date(
                 )
             )
 
-            if subject_id not in grouped:
+            # --------------------------------------------------------
+            # NORMAL and SUBSTITUTE must have different identities.
+            # --------------------------------------------------------
 
-                grouped[subject_id] = {
+            key = (
+                subject_id,
+                str(period_no),
+                section.upper(),
+                is_substitute,
+            )
+
+            if key not in unique_periods:
+
+                unique_periods[key] = item
+
+            else:
+
+                print(
+                    "⚠️ DUPLICATE EFFECTIVE PERIOD IGNORED:",
+                    key
+                )
+
+        effective_periods = list(
+            unique_periods.values()
+        )
+
+        # ============================================================
+        # 11. SORT BY PERIOD
+        #
+        # If same period contains:
+        #
+        #     NORMAL
+        #     SUBSTITUTE
+        #
+        # NORMAL is shown first.
+        # ============================================================
+
+        effective_periods.sort(
+            key=lambda x: (
+                x["period_no"]
+                if x["period_no"] is not None
+                else 999999,
+
+                1
+                if x.get(
+                    "is_substitute",
+                    False
+                )
+                else 0,
+
+                str(
+                    x.get(
+                        "subject_id",
+                        ""
+                    )
+                )
+            )
+        )
+
+        # ============================================================
+        # 12. BUILD FINAL SUBJECT LIST
+        #
+        # CRITICAL:
+        #
+        # Do NOT group only by subject_id.
+        #
+        # Group by:
+        #
+        #     subject_id
+        #     is_substitute
+        #
+        # Therefore:
+        #
+        #     Physics NORMAL
+        #
+        # and
+        #
+        #     Physics SUBSTITUTE
+        #
+        # remain two separate attendance makers.
+        # ============================================================
+
+        grouped = {}
+
+        for item in effective_periods:
+
+            subject_id = str(
+                item.get(
+                    "subject_id",
+                    ""
+                ) or ""
+            ).strip()
+
+            if not subject_id:
+                continue
+
+            subject_name = str(
+                item.get(
+                    "subject_name",
+                    ""
+                ) or ""
+            ).strip()
+
+            subject_type = str(
+                item.get(
+                    "type",
+                    ""
+                ) or ""
+            ).strip()
+
+            section = str(
+                item.get(
+                    "section",
+                    "ALL"
+                ) or "ALL"
+            ).strip()
+
+            is_substitute = bool(
+                item.get(
+                    "is_substitute",
+                    False
+                )
+            )
+
+            # ========================================================
+            # IMPORTANT GROUP KEY
+            #
+            # Same subject:
+            #
+            #     NORMAL      -> one group
+            #     SUBSTITUTE  -> another group
+            # ========================================================
+
+            group_key = (
+                subject_id,
+                is_substitute
+            )
+
+            if group_key not in grouped:
+
+                grouped[group_key] = {
 
                     "subject_id":
                         subject_id,
@@ -3169,57 +3501,60 @@ def get_subjects_by_date(
                         is_substitute,
 
                     "_first_period":
-                        item["period_no"],
+                        item.get(
+                            "period_no"
+                        ),
                 }
 
-            else:
-
-                # If ANY occurrence of this subject is a substitute,
-                # mark the subject as substitute.
-                #
-                # This ensures Flutter can display *.
-                if is_substitute:
-
-                    grouped[
-                        subject_id
-                    ]["is_substitute"] = True
+            # ========================================================
+            # ADD SECTION
+            # ========================================================
 
             if section not in grouped[
-                subject_id
+                group_key
             ]["sections"]:
 
                 grouped[
-                    subject_id
+                    group_key
                 ]["sections"].append(
                     section
                 )
 
-            # --------------------------------------------------------
-            # Keep earliest period for sorting.
-            # --------------------------------------------------------
+            # ========================================================
+            # KEEP EARLIEST PERIOD
+            # ========================================================
+
             current_first = grouped[
-                subject_id
+                group_key
             ].get(
                 "_first_period"
+            )
+
+            item_period = item.get(
+                "period_no"
             )
 
             if (
                 current_first is None
                 or (
-                    item["period_no"] is not None
-                    and item["period_no"] < current_first
+                    item_period is not None
+                    and (
+                        current_first is None
+                        or item_period < current_first
+                    )
                 )
             ):
 
                 grouped[
-                    subject_id
+                    group_key
                 ]["_first_period"] = (
-                    item["period_no"]
+                    item_period
                 )
 
         # ============================================================
-        # 13. SORT SUBJECTS BY FIRST PERIOD
+        # 13. SORT FINAL SUBJECTS BY FIRST PERIOD
         # ============================================================
+
         result = list(
             grouped.values()
         )
@@ -3232,13 +3567,28 @@ def get_subjects_by_date(
                 if x.get(
                     "_first_period"
                 ) is not None
-                else 999999
+                else 999999,
+
+                1
+                if x.get(
+                    "is_substitute",
+                    False
+                )
+                else 0,
+
+                str(
+                    x.get(
+                        "subject_id",
+                        ""
+                    )
+                )
             )
         )
 
         # ============================================================
         # 14. REMOVE INTERNAL SORT FIELD
         # ============================================================
+
         for item in result:
 
             item.pop(
@@ -3247,10 +3597,26 @@ def get_subjects_by_date(
             )
 
         # ============================================================
-        # 15. DEBUG OUTPUT
+        # 15. FINAL DEBUG
         # ============================================================
+
+        print()
+        print("=" * 80)
+        print("📚 EFFECTIVE FACULTY SUBJECTS")
+        print("=" * 80)
+
         print(
-            "📚 EFFECTIVE FACULTY SUBJECTS:",
+            "Faculty:",
+            faculty_id
+        )
+
+        print(
+            "Date:",
+            parsed_date
+        )
+
+        print(
+            "Total:",
             len(result)
         )
 
@@ -3267,11 +3633,31 @@ def get_subjects_by_date(
 
             print(
                 "   →",
-                prefix + item["subject_name"],
+                prefix
+                + str(
+                    item.get(
+                        "subject_name",
+                        ""
+                    )
+                ),
+                "("
+                + str(
+                    item.get(
+                        "subject_id",
+                        ""
+                    )
+                )
+                + ")",
                 "| Type:",
-                item["type"],
+                item.get(
+                    "type",
+                    ""
+                ),
                 "| Sections:",
-                item["sections"],
+                item.get(
+                    "sections",
+                    []
+                ),
                 "| Substitute:",
                 item.get(
                     "is_substitute",
@@ -3279,13 +3665,24 @@ def get_subjects_by_date(
                 )
             )
 
+        print("=" * 80)
+
         # ============================================================
         # 16. RETURN TO FLUTTER
         # ============================================================
+
         return result
+
+    # ================================================================
+    # HTTP EXCEPTION
+    # ================================================================
 
     except HTTPException:
         raise
+
+    # ================================================================
+    # GENERAL ERROR
+    # ================================================================
 
     except Exception as e:
 
@@ -3302,17 +3699,24 @@ def get_subjects_by_date(
             )
         )
 
+    # ================================================================
+    # ALWAYS CLOSE DATABASE
+    # ================================================================
+
     finally:
 
         try:
             cur.close()
+
         except Exception:
             pass
 
         try:
             conn.close()
+
         except Exception:
             pass
+
 
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
