@@ -4457,14 +4457,17 @@ def attendance_exists(
     cur = conn.cursor()
 
     try:
+        # attendance_daily does not store department.
+        # Department is resolved through the student record.
         cur.execute("""
             SELECT 1
-            FROM attendance_daily
-            WHERE LOWER(TRIM(department)) = LOWER(TRIM(%s))
-              AND LOWER(TRIM(semester))   = LOWER(TRIM(%s))
-              AND LOWER(TRIM(subject))    = LOWER(TRIM(%s))
-              AND class_date = %s
-              AND LOWER(TRIM(section))    = LOWER(TRIM(%s))
+            FROM attendance_daily a
+            INNER JOIN students s ON s.sbrn = a.sbrn
+            WHERE LOWER(TRIM(s.department)) = LOWER(TRIM(%s))
+              AND LOWER(TRIM(a.semester))   = LOWER(TRIM(%s))
+              AND LOWER(TRIM(a.subject_id)) = LOWER(TRIM(%s))
+              AND a.class_date = %s
+              AND LOWER(TRIM(a.section))    = LOWER(TRIM(%s))
             LIMIT 1
         """, (
             department,
@@ -4508,6 +4511,36 @@ def mark_attendance(data: AttendanceRequest):
         day_short = class_date.strftime("%a")
 
         section_value = (data.section or "").lower()
+
+        # --------------------------------------------------
+        # 1.5️⃣ PERMANENT SERVER-SIDE LOCK
+        # --------------------------------------------------
+        # Once attendance exists for this exact department,
+        # semester, subject, section and date, it can never
+        # be submitted/overwritten again from Flutter.
+        cur.execute("""
+            SELECT 1
+            FROM attendance_daily a
+            INNER JOIN students s ON s.sbrn = a.sbrn
+            WHERE LOWER(TRIM(s.department)) = LOWER(TRIM(%s))
+              AND LOWER(TRIM(a.semester))   = LOWER(TRIM(%s))
+              AND LOWER(TRIM(a.subject_id)) = LOWER(TRIM(%s))
+              AND a.class_date = %s
+              AND LOWER(TRIM(a.section))    = LOWER(TRIM(%s))
+            LIMIT 1
+        """, (
+            data.department,
+            data.semester,
+            data.subject,
+            class_date,
+            data.section
+        ))
+
+        if cur.fetchone():
+            return {
+                "status": "already_marked",
+                "message": "Attendance already marked for this subject/date/section."
+            }
 
         # --------------------------------------------------
         # 2️⃣ Verify timetable period exists
@@ -4604,42 +4637,41 @@ def get_attendance(department: str, semester: str, month: int, year: int, subjec
     conn = connect_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT a.sbrn,
-               a.subject,
-               a.semester,
-               a.section,
-               a.class_date,
-               a.attended
-        FROM attendance_daily a
-        JOIN students s ON a.sbrn = s.sbrn
-        WHERE LOWER(s.department)=LOWER(%s)
-          AND LOWER(a.semester)=LOWER(%s)
-          AND EXTRACT(MONTH FROM a.class_date)=%s
-          AND EXTRACT(YEAR FROM a.class_date)=%s
-          AND LOWER(a.subject)=LOWER(%s)
-    """, (department, semester, month, year, subject))
+    try:
+        cur.execute("""
+            SELECT a.sbrn,
+                   a.subject,
+                   a.semester,
+                   a.section,
+                   a.class_date,
+                   a.attended
+            FROM attendance_daily a
+            INNER JOIN students s ON a.sbrn = s.sbrn
+            WHERE LOWER(TRIM(s.department)) = LOWER(TRIM(%s))
+              AND LOWER(TRIM(a.semester)) = LOWER(TRIM(%s))
+              AND EXTRACT(MONTH FROM a.class_date) = %s
+              AND EXTRACT(YEAR FROM a.class_date) = %s
+              AND LOWER(TRIM(a.subject_id)) = LOWER(TRIM(%s))
+            ORDER BY a.class_date, a.sbrn
+        """, (department, semester, month, year, subject))
 
-    rows = cur.fetchall()
-    release_db(conn)
+        rows = cur.fetchall()
 
-    return [
-        {
-            "sbrn": r[0],
-            "subject": r[1],   # 🔥 changed from subject_id
-            "semester": r[2],
-            "section": r[3],
-            "class_date": r[4].strftime("%Y-%m-%d"),
-            "attended": r[5]
-        }
-        for r in rows
-    ]
+        return [
+            {
+                "sbrn": r[0],
+                "subject": r[1],
+                "subject_id": r[1],
+                "semester": r[2],
+                "section": r[3],
+                "class_date": r[4].strftime("%Y-%m-%d"),
+                "attended": int(r[5] or 0),
+            }
+            for r in rows
+        ]
 
-
-
-# ======================================================
-# 🔥 SYNC STUDENTS (LOCAL → CLOUD) — FINAL FIXED
-# ======================================================
+    finally:
+        release_db(conn)
 
 @app.post("/sync/students")
 def sync_students(records: list = Body(...)):
