@@ -19,7 +19,7 @@ from datetime import date as dt_date
 import threading
 import requests
 import time
-
+import os
 app = FastAPI()
 
 # ======================================================
@@ -466,6 +466,31 @@ def verify_password(password: str, stored_hash: str) -> bool:
 
     except Exception:
         return False
+
+# ======================================================
+# PASSWORD HASH
+# ======================================================
+
+def hash_password(password: str) -> str:
+    """
+    Create a PBKDF2-SHA256 password hash compatible
+    with verify_password().
+    """
+
+    salt = os.urandom(16)
+
+    password_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        120000
+    )
+
+    salt_b64 = base64.b64encode(salt).decode("utf-8")
+    hash_b64 = base64.b64encode(password_hash).decode("utf-8")
+
+    return f"pbkdf2_sha256${salt_b64}${hash_b64}"
+
 
 # ======================================================
 # 🔥 WORKING DAY CHECK (CLOUD AUTHORITATIVE)
@@ -1739,6 +1764,192 @@ def login(data: LoginModel):
 
     finally:
         release_db(conn)
+
+
+# ======================================================
+# CHANGE PASSWORD
+# ======================================================
+
+@app.post("/change-password")
+def change_password(data: dict = Body(...)):
+
+    username = str(
+        data.get("username") or ""
+    ).strip()
+
+    current_password = str(
+        data.get("current_password") or ""
+    )
+
+    new_password = str(
+        data.get("new_password") or ""
+    )
+
+    # --------------------------------------------------
+    # BASIC VALIDATION
+    # --------------------------------------------------
+
+    if not username:
+        raise HTTPException(
+            status_code=400,
+            detail="Username is required"
+        )
+
+    if not current_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Current password is required"
+        )
+
+    if not new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="New password is required"
+        )
+
+    if len(new_password) < 6:
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be at least 6 characters"
+        )
+
+    if current_password == new_password:
+        raise HTTPException(
+            status_code=400,
+            detail="New password must be different from current password"
+        )
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        # ==================================================
+        # STEP 1: FIND USER ACCOUNT
+        # ==================================================
+
+        cur.execute("""
+            SELECT
+                username,
+                password,
+                role,
+                active
+            FROM users
+            WHERE LOWER(TRIM(username))
+                  = LOWER(TRIM(%s))
+            LIMIT 1
+        """, (username,))
+
+        user = cur.fetchone()
+
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="User account not found"
+            )
+
+        db_username = str(
+            user[0] or ""
+        ).strip()
+
+        stored_password = user[1]
+        role = user[2]
+        active = user[3]
+
+        # ==================================================
+        # STEP 2: ACCOUNT STATUS
+        # ==================================================
+
+        if active == 0:
+            raise HTTPException(
+                status_code=403,
+                detail="Account Disabled"
+            )
+
+        # ==================================================
+        # STEP 3: VERIFY CURRENT PASSWORD
+        # ==================================================
+
+        if not verify_password(
+            current_password,
+            stored_password
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Current password is incorrect"
+            )
+
+        # ==================================================
+        # STEP 4: CREATE NEW PASSWORD HASH
+        # ==================================================
+
+        new_password_hash = hash_password(
+            new_password
+        )
+
+        # ==================================================
+        # STEP 5: UPDATE USERS TABLE
+        # ==================================================
+
+        cur.execute("""
+            UPDATE users
+            SET password = %s
+            WHERE LOWER(TRIM(username))
+                  = LOWER(TRIM(%s))
+        """, (
+            new_password_hash,
+            db_username
+        ))
+
+        if cur.rowcount != 1:
+            raise HTTPException(
+                status_code=500,
+                detail="Password update failed"
+            )
+
+        conn.commit()
+
+        # ==================================================
+        # DEBUG LOG
+        # ==================================================
+
+        print("\n" + "=" * 70)
+        print("🔐 PASSWORD CHANGED")
+        print(
+            f"   Username : {db_username}"
+        )
+        print(
+            f"   Role     : {role}"
+        )
+        print("=" * 70)
+
+        return {
+            "status": "success",
+            "message": "Password changed successfully",
+            "username": db_username
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+
+    except Exception as e:
+
+        conn.rollback()
+
+        print(
+            "❌ CHANGE PASSWORD ERROR:",
+            e
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Password change failed: {str(e)}"
+        )
+
+    finally:
+        release_db(conn)
+
 # ======================================================
 # FACULTY WORKLOAD
 # Returns ONLY departments and semesters assigned
