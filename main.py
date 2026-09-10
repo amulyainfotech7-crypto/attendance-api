@@ -7903,95 +7903,292 @@ def sync_attendance_to_cloud(records: list = Body(...)):
 # 🔥 INCREMENTAL ATTENDANCE SYNC (DESKTOP-ALIGNED SAFE)
 # ======================================================
 
-@app.get("/sync/attendance")
-def sync_attendance_from_cloud(
-    since: Optional[str] = Query(default=None)
+# ======================================================
+# 🔥 ATTENDANCE BATCH SYNC (DESKTOP → CLOUD)
+# ======================================================
+@app.post("/sync-attendance-batch")
+def sync_attendance_batch(
+    records: list = Body(...)
 ):
+    """
+    Desktop → Cloud attendance batch synchronization.
+
+    Receives JSON-safe attendance records from the desktop
+    attendance_batch_queue processor and safely UPSERTS them
+    into PostgreSQL attendance_daily.
+
+    IMPORTANT:
+    - Uses the existing attendance_daily logical key.
+    - Does NOT delete existing cloud records.
+    - Does NOT overwrite newer cloud records with older data.
+    - Preserves attended and periods values.
+    - Broadcasts attendance_daily after successful sync.
+    """
+
+    if not records:
+        return {
+            "ok": True,
+            "status": "no_data",
+            "rows_processed": 0
+        }
 
     conn = connect_db()
     cur = conn.cursor()
 
     try:
 
-        # --------------------------------------------------
-        # 🔒 Validate timestamp safely
-        # --------------------------------------------------
-        if since:
+        # ==================================================
+        # NORMALIZE / VALIDATE RECORDS
+        # ==================================================
+
+        normalized_records = []
+
+        for row in records:
+
+            if not isinstance(row, dict):
+                continue
+
+            sbrn = row.get("sbrn")
+            subject_id = row.get("subject_id")
+            subject = row.get("subject")
+            semester = row.get("semester")
+            section = row.get("section")
+            class_date = row.get("class_date")
+            attended = row.get("attended", 0)
+            periods = row.get("periods", 0)
+            last_updated = row.get("last_updated")
+
+            # --------------------------------------------------
+            # Required fields
+            # --------------------------------------------------
+
+            if not sbrn:
+                continue
+
+            if not subject_id:
+                continue
+
+            if not semester:
+                continue
+
+            if not section:
+                continue
+
+            if not class_date:
+                continue
+
+            # --------------------------------------------------
+            # Safe defaults
+            # --------------------------------------------------
+
+            if subject is None:
+                subject = subject_id
+
             try:
-                parsed_since = datetime.fromisoformat(since)
+                attended = int(attended or 0)
             except Exception:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid 'since' timestamp format. Use ISO format."
+                attended = 0
+
+            try:
+                periods = int(periods or 0)
+            except Exception:
+                periods = 0
+
+            # --------------------------------------------------
+            # Normalize attendance value
+            # --------------------------------------------------
+
+            attended = 1 if attended else 0
+
+            # --------------------------------------------------
+            # Normalize date
+            # --------------------------------------------------
+
+            if hasattr(class_date, "isoformat"):
+                class_date = class_date.isoformat()
+
+            class_date = str(class_date).strip()
+
+            # --------------------------------------------------
+            # Normalize timestamp
+            # --------------------------------------------------
+
+            if last_updated is None:
+                last_updated = datetime.utcnow()
+
+            normalized_records.append({
+                "sbrn": str(sbrn).strip(),
+                "subject_id": str(subject_id).strip(),
+                "subject": str(subject).strip(),
+                "semester": str(semester).strip(),
+                "section": str(section).strip(),
+                "class_date": class_date,
+                "attended": attended,
+                "periods": periods,
+                "last_updated": last_updated
+            })
+
+        # ==================================================
+        # NOTHING VALID
+        # ==================================================
+
+        if not normalized_records:
+
+            return {
+                "ok": True,
+                "status": "no_valid_data",
+                "rows_processed": 0
+            }
+
+        # ==================================================
+        # UPSERT ATTENDANCE
+        # ==================================================
+
+        query = """
+        INSERT INTO attendance_daily
+        (
+            sbrn,
+            subject_id,
+            subject,
+            semester,
+            section,
+            class_date,
+            attended,
+            periods,
+            last_updated
+        )
+        VALUES
+        (
+            %(sbrn)s,
+            %(subject_id)s,
+            %(subject)s,
+            %(semester)s,
+            %(section)s,
+            %(class_date)s,
+            %(attended)s,
+            %(periods)s,
+            %(last_updated)s
+        )
+
+        ON CONFLICT
+        (
+            sbrn,
+            subject_id,
+            semester,
+            section,
+            class_date
+        )
+
+        DO UPDATE SET
+
+            subject =
+                EXCLUDED.subject,
+
+            attended =
+                EXCLUDED.attended,
+
+            periods =
+                EXCLUDED.periods,
+
+            last_updated =
+                EXCLUDED.last_updated
+
+        WHERE
+            attendance_daily.last_updated IS NULL
+
+            OR
+
+            EXCLUDED.last_updated IS NULL
+
+            OR
+
+            attendance_daily.last_updated
+            < EXCLUDED.last_updated
+        """
+
+        execute_batch(
+            cur,
+            query,
+            normalized_records
+        )
+
+        # ==================================================
+        # COMMIT
+        # ==================================================
+
+        conn.commit()
+
+        rows_processed = len(normalized_records)
+
+        print()
+        print("=" * 80)
+        print("☁ ATTENDANCE BATCH SYNC SUCCESS")
+        print("=" * 80)
+        print(
+            f"📦 Records received : {len(records)}"
+        )
+        print(
+            f"💾 Records processed: {rows_processed}"
+        )
+        print("=" * 80)
+
+        # ==================================================
+        # 🔔 REALTIME BROADCAST
+        # ==================================================
+
+        try:
+
+            loop = asyncio.get_running_loop()
+
+            loop.create_task(
+                broadcast_event(
+                    "attendance_daily"
                 )
+            )
 
-            cur.execute("""
-                SELECT
-                    sbrn,
-                    subject_id,
-                    subject,
-                    semester,
-                    section,
-                    class_date,
-                    attended,
-                    last_updated
-                FROM attendance_daily
-                WHERE last_updated > %s
-                ORDER BY last_updated ASC
-            """, (parsed_since,))
-        else:
-            # First full sync
-            cur.execute("""
-                SELECT
-                    sbrn,
-                    subject_id,
-                    subject,
-                    semester,
-                    section,
-                    class_date,
-                    attended,
-                    last_updated
-                FROM attendance_daily
-                ORDER BY last_updated ASC
-            """)
+        except RuntimeError:
+            pass
 
-        rows = cur.fetchall()
+        # ==================================================
+        # SUCCESS RESPONSE
+        # ==================================================
+
+        return {
+            "ok": True,
+            "status": "success",
+            "rows_processed": rows_processed
+        }
+
+    # ======================================================
+    # ERROR HANDLING
+    # ======================================================
 
     except Exception as e:
+
+        conn.rollback()
+
+        print()
+        print("=" * 80)
+        print("❌ ATTENDANCE BATCH SYNC FAILED")
+        print("=" * 80)
+        print("❌ ERROR:", str(e))
+        print("=" * 80)
+
+        import traceback
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    # ======================================================
+    # RELEASE CONNECTION
+    # ======================================================
+
+    finally:
+
         release_db(conn)
-        raise HTTPException(status_code=500, detail=str(e))
-
-    release_db(conn)
-
-    # --------------------------------------------------
-    # 🔥 JSON SAFE RESPONSE (DESKTOP COMPATIBLE)
-    # --------------------------------------------------
-
-    data = [
-        {
-            "sbrn": r[0],
-            "subject_id": r[1],   # 🔥 CRITICAL (desktop key)
-            "subject": r[2],      # optional (readability)
-            "semester": r[3],
-            "section": r[4],
-            "class_date": r[5].strftime("%Y-%m-%d"),
-            "attended": r[6],
-            "last_updated": r[7].isoformat() if r[7] else None
-        }
-        for r in rows
-    ]
-
-    latest_sync = None
-    if rows:
-        latest_sync = rows[-1][7].isoformat()
-
-    return {
-        "status": "success",
-        "count": len(data),
-        "latest_sync": latest_sync,
-        "records": data
-    }
-
 # ======================================================
 # RESET TIMETABLE (DESKTOP → CLOUD)
 # ======================================================
