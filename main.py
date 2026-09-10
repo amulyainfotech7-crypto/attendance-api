@@ -2046,41 +2046,27 @@ def get_faculty_workload(faculty_id: str):
     finally:
         release_db(conn)
 
-
 # ======================================================
-# PRACTICAL MARKS SUBJECTS
-# FACULTY + DEPARTMENT + SEMESTER
+# PRACTICAL MARKS — SUBJECTS
+# ======================================================
+#
+# Practical subjects are resolved from timetable_slots, the
+# same authoritative faculty-assignment source used by the
+# faculty workload API.
+#
+# This endpoint is intentionally separate from attendance.
 # ======================================================
 
 @app.get("/practical-subjects")
 def get_practical_subjects(
     faculty_id: str,
     department: str,
-    semester: str
+    semester: str,
 ):
-    """
-    Return practical/lab subjects assigned to the logged-in
-    faculty for the selected department and semester.
-
-    IMPORTANT:
-        This endpoint is ONLY for Practical Marks.
-
-        It does NOT modify:
-            - attendance
-            - timetable
-            - faculty workload
-            - students
-            - WebSocket logic
-            - existing synchronization
-    """
 
     faculty_id = str(faculty_id or "").strip()
     department = str(department or "").strip()
     semester = str(semester or "").strip()
-
-    # --------------------------------------------------
-    # VALIDATION
-    # --------------------------------------------------
 
     if not faculty_id:
         raise HTTPException(
@@ -2105,182 +2091,855 @@ def get_practical_subjects(
 
     try:
 
-        # ==================================================
-        # PRACTICAL SUBJECTS
-        #
-        # timetable_slots is used as the authoritative
-        # faculty assignment source.
-        #
-        # Only LAB / PRACTICAL subjects are returned.
-        # ==================================================
-
         cur.execute("""
-            SELECT
-                t.subject_id,
+            SELECT DISTINCT
+                TRIM(t.subject_id) AS subject_id,
                 COALESCE(
                     NULLIF(TRIM(s.subject_name), ''),
                     TRIM(t.subject_id)
                 ) AS subject_name,
-                TRIM(t.section) AS section,
                 COALESCE(
+                    NULLIF(TRIM(s.type), ''),
                     NULLIF(TRIM(t.type), ''),
-                    NULLIF(TRIM(s.type), '')
-                ) AS subject_type
+                    'LAB'
+                ) AS subject_type,
+                TRIM(t.section) AS section
             FROM timetable_slots t
-
             LEFT JOIN subjects s
                 ON LOWER(TRIM(s.subject_id))
-                   = LOWER(TRIM(t.subject_id))
-               AND LOWER(TRIM(s.department))
-                   = LOWER(TRIM(t.department))
-               AND LOWER(TRIM(s.semester))
-                   = LOWER(TRIM(t.semester))
-
+                 = LOWER(TRIM(t.subject_id))
             WHERE LOWER(TRIM(t.faculty_id))
                   = LOWER(TRIM(%s))
-
               AND LOWER(TRIM(t.department))
                   = LOWER(TRIM(%s))
-
               AND LOWER(TRIM(t.semester))
                   = LOWER(TRIM(%s))
-
               AND t.subject_id IS NOT NULL
               AND TRIM(t.subject_id) <> ''
-
               AND (
-                    LOWER(TRIM(COALESCE(t.type, '')))
-                        IN ('lab', 'practical')
+                    UPPER(TRIM(COALESCE(t.type, '')))
+                        IN ('LAB', 'PRACTICAL', 'PRACTICALS', 'WORKSHOP')
                     OR
-                    LOWER(TRIM(COALESCE(s.type, '')))
-                        IN ('lab', 'practical')
+                    UPPER(TRIM(t.subject_id)) LIKE '%%_P'
                     OR
-                    LOWER(TRIM(COALESCE(t.subject_id, '')))
-                        LIKE '%%_P'
+                    UPPER(TRIM(COALESCE(s.type, '')))
+                        IN ('LAB', 'PRACTICAL', 'PRACTICALS', 'WORKSHOP')
                   )
-
-              AND t.section IS NOT NULL
-              AND TRIM(t.section) <> ''
-
-            GROUP BY
-                t.subject_id,
-                s.subject_name,
-                t.section,
-                t.type,
-                s.type
-
             ORDER BY
-                t.subject_id,
-                t.section
+                TRIM(t.subject_id),
+                TRIM(t.section)
         """, (
             faculty_id,
             department,
-            semester
+            semester,
         ))
 
         rows = cur.fetchall()
 
-        # ==================================================
-        # GROUP SECTIONS UNDER EACH SUBJECT
-        # ==================================================
-
-        subjects_map = {}
+        subjects = {}
 
         for row in rows:
-
-            subject_id = (
-                str(row[0]).strip()
-                if row[0] is not None
-                else ""
-            )
-
-            subject_name = (
-                str(row[1]).strip()
-                if row[1] is not None
-                else subject_id
-            )
-
-            section = (
-                str(row[2]).strip()
-                if row[2] is not None
-                else ""
-            )
-
-            subject_type = (
-                str(row[3]).strip()
-                if row[3] is not None
-                else "LAB"
-            )
+            subject_id = str(row[0] or '').strip()
+            subject_name = str(row[1] or subject_id).strip()
+            subject_type = str(row[2] or 'LAB').strip()
+            section = str(row[3] or '').strip()
 
             if not subject_id:
                 continue
 
-            if subject_id not in subjects_map:
-
-                subjects_map[subject_id] = {
+            item = subjects.setdefault(
+                subject_id,
+                {
                     "subject_id": subject_id,
                     "subject_name": subject_name,
                     "type": subject_type,
-                    "sections": []
-                }
-
-            if (
-                section
-                and section not in subjects_map[subject_id]["sections"]
-            ):
-                subjects_map[subject_id]["sections"].append(section)
-
-        result = list(subjects_map.values())
-
-        # ==================================================
-        # SORT SECTIONS
-        # ==================================================
-
-        for item in result:
-            item["sections"] = sorted(
-                item["sections"],
-                key=lambda x: str(x).lower()
+                    "sections": [],
+                },
             )
 
-        # ==================================================
-        # DEBUG
-        # ==================================================
+            if section and section not in item["sections"]:
+                item["sections"].append(section)
 
-        print("\n" + "=" * 80)
-        print("🧪 PRACTICAL MARKS SUBJECTS")
-        print("=" * 80)
-        print(f"Faculty ID : {faculty_id}")
-        print(f"Department : {department}")
-        print(f"Semester   : {semester}")
-        print(f"Subjects   : {len(result)}")
+        result = list(subjects.values())
 
         for item in result:
-            print(
-                f"   → {item['subject_name']} "
-                f"({item['subject_id']}) | "
-                f"Sections: {item['sections']}"
-            )
+            item["sections"].sort()
 
-        print("=" * 80)
+        print(
+            "📚 PRACTICAL SUBJECTS API → "
+            f"Faculty={faculty_id} | "
+            f"Department={department} | "
+            f"Semester={semester} | "
+            f"Subjects={len(result)}"
+        )
 
         return {
             "status": "success",
             "faculty_id": faculty_id,
             "department": department,
             "semester": semester,
-            "subjects": result
+            "subjects": result,
         }
 
     except Exception as e:
 
         print(
             "❌ GET /practical-subjects ERROR:",
-            e
+            str(e)
         )
 
         raise HTTPException(
             status_code=500,
             detail=f"Failed to load practical subjects: {str(e)}"
+        )
+
+    finally:
+        release_db(conn)
+
+
+# ======================================================
+# PRACTICAL MARKS — COMMON HELPERS
+# ======================================================
+
+def _practical_scheme(semester: str):
+    """
+    Server-side curriculum rules.
+
+    1st + 2nd semester -> N-2026
+        Performance /30
+        Report /5
+        Viva /10
+        Attendance /5 (automatic)
+        Total /50
+
+    3rd semester onward -> N-2022
+        Performance /24
+        Report /8
+        Viva /8
+        Total /40
+    """
+
+    normalized = str(semester or "").strip().lower()
+
+    is_n2026 = normalized in {
+        "1st semester",
+        "2nd semester",
+        "1st",
+        "2nd",
+    }
+
+    if is_n2026:
+        return {
+            "scheme": "N-2026",
+            "performance_max": 30,
+            "report_max": 5,
+            "viva_max": 10,
+            "attendance_max": 5,
+            "total_max": 50,
+            "has_attendance": True,
+        }
+
+    return {
+        "scheme": "N-2022",
+        "performance_max": 24,
+        "report_max": 8,
+        "viva_max": 8,
+        "attendance_max": 0,
+        "total_max": 40,
+        "has_attendance": False,
+    }
+
+
+def _verify_practical_faculty_assignment(
+    cur,
+    faculty_id: str,
+    department: str,
+    semester: str,
+    subject_id: str,
+    section: str,
+):
+    """
+    Verify that the selected practical subject + section is
+    actually assigned to the logged-in faculty.
+
+    timetable_slots remains the authoritative assignment source.
+    """
+
+    cur.execute("""
+        SELECT 1
+        FROM timetable_slots t
+        WHERE LOWER(TRIM(t.faculty_id))
+              = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.department))
+              = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.semester))
+              = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.subject_id))
+              = LOWER(TRIM(%s))
+          AND LOWER(TRIM(COALESCE(t.section, '')))
+              = LOWER(TRIM(%s))
+          AND t.subject_id IS NOT NULL
+          AND TRIM(t.subject_id) <> ''
+          AND (
+                UPPER(TRIM(COALESCE(t.type, '')))
+                    IN ('LAB', 'PRACTICAL', 'PRACTICALS', 'WORKSHOP')
+                OR
+                UPPER(TRIM(t.subject_id)) LIKE '%%_P'
+              )
+        LIMIT 1
+    """, (
+        faculty_id,
+        department,
+        semester,
+        subject_id,
+        section,
+    ))
+
+    if cur.fetchone() is None:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Selected practical subject/section is not assigned "
+                "to this faculty."
+            )
+        )
+
+
+def _practical_attendance_map(
+    cur,
+    semester: str,
+    subject_id: str,
+    max_marks: int,
+):
+    """
+    Automatic N-2026 practical attendance marks.
+
+    Source of truth remains master_attendance.
+    The calculation is the same percentage-to-maximum scaling
+    used by the existing desktop practical IA logic.
+    """
+
+    if max_marks <= 0:
+        return {}
+
+    cur.execute("""
+        SELECT
+            sbrn,
+            SUM(attended) AS attended,
+            SUM(delivered) AS delivered
+        FROM master_attendance
+        WHERE LOWER(TRIM(semester)) = LOWER(TRIM(%s))
+          AND (
+                UPPER(TRIM(COALESCE(subject_id, '')))
+                    = UPPER(TRIM(%s))
+                OR
+                UPPER(TRIM(COALESCE(subject, '')))
+                    = UPPER(TRIM(%s))
+              )
+        GROUP BY sbrn
+    """, (
+        semester,
+        subject_id,
+        subject_id,
+    ))
+
+    result = {}
+
+    for row in cur.fetchall():
+        sbrn = str(row[0] or '').strip()
+        if not sbrn:
+            continue
+
+        try:
+            attended = float(row[1] or 0)
+            delivered = float(row[2] or 0)
+        except (TypeError, ValueError):
+            result[sbrn] = 0.0
+            continue
+
+        if delivered <= 0:
+            result[sbrn] = 0.0
+            continue
+
+        percentage = attended / delivered
+        percentage = max(0.0, min(percentage, 1.0))
+
+        marks = round(
+            percentage * float(max_marks),
+            2,
+        )
+
+        result[sbrn] = max(
+            0.0,
+            min(marks, float(max_marks)),
+        )
+
+    return result
+
+
+# ======================================================
+# GET PRACTICAL MARKS
+# ======================================================
+
+@app.get("/practical-marks")
+def get_practical_marks(
+    faculty_id: str,
+    department: str,
+    semester: str,
+    subject_id: str,
+    section: str,
+    practical_number: str,
+):
+
+    faculty_id = str(faculty_id or "").strip()
+    department = str(department or "").strip()
+    semester = str(semester or "").strip()
+    subject_id = str(subject_id or "").strip()
+    section = str(section or "").strip()
+    practical_number = str(practical_number or "").strip()
+
+    if not all([
+        faculty_id,
+        department,
+        semester,
+        subject_id,
+        section,
+        practical_number,
+    ]):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "faculty_id, department, semester, subject_id, "
+                "section and practical_number are required"
+            )
+        )
+
+    allowed_practicals = {
+        f"Practical {i}" for i in range(1, 16)
+    }
+
+    if practical_number not in allowed_practicals:
+        raise HTTPException(
+            status_code=400,
+            detail="practical_number must be Practical 1 through Practical 15"
+        )
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        _verify_practical_faculty_assignment(
+            cur,
+            faculty_id,
+            department,
+            semester,
+            subject_id,
+            section,
+        )
+
+        scheme = _practical_scheme(semester)
+
+        performance_type = (
+            f"{practical_number} – Practical Performance"
+        )
+        report_type = (
+            f"{practical_number} – Practical Report"
+        )
+        viva_type = (
+            f"{practical_number} – Practical Viva"
+        )
+
+        cur.execute("""
+            SELECT
+                s.sbrn,
+                s.name,
+                MAX(
+                    CASE
+                        WHEN em.exam_type = %s
+                        THEN em.marks
+                    END
+                ) AS performance,
+                MAX(
+                    CASE
+                        WHEN em.exam_type = %s
+                        THEN em.marks
+                    END
+                ) AS report,
+                MAX(
+                    CASE
+                        WHEN em.exam_type = %s
+                        THEN em.marks
+                    END
+                ) AS viva
+            FROM students s
+            LEFT JOIN exam_marks em
+                ON em.sbrn = s.sbrn
+               AND LOWER(TRIM(em.semester))
+                   = LOWER(TRIM(%s))
+               AND LOWER(TRIM(em.subject_id))
+                   = LOWER(TRIM(%s))
+               AND em.exam_type IN (%s, %s, %s)
+            WHERE LOWER(TRIM(COALESCE(s.department, '')))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(COALESCE(s.semester, '')))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(COALESCE(s.section, '')))
+                    = LOWER(TRIM(%s))
+              AND COALESCE(s.status_locked, 0) = 0
+              AND UPPER(TRIM(COALESCE(s.academic_status, 'ACTIVE')))
+                    = 'ACTIVE'
+            GROUP BY
+                s.sbrn,
+                s.name
+            ORDER BY
+                s.sbrn
+        """, (
+            performance_type,
+            report_type,
+            viva_type,
+            semester,
+            subject_id,
+            performance_type,
+            report_type,
+            viva_type,
+            department,
+            semester,
+            section,
+        ))
+
+        rows = cur.fetchall()
+
+        attendance_map = {}
+
+        if scheme["has_attendance"]:
+            attendance_map = _practical_attendance_map(
+                cur,
+                semester,
+                subject_id,
+                scheme["attendance_max"],
+            )
+
+        result = []
+
+        for row in rows:
+            sbrn = str(row[0] or '').strip()
+
+            try:
+                performance = (
+                    int(row[2]) if row[2] is not None else None
+                )
+            except (TypeError, ValueError):
+                performance = None
+
+            try:
+                report = (
+                    int(row[3]) if row[3] is not None else None
+                )
+            except (TypeError, ValueError):
+                report = None
+
+            try:
+                viva = (
+                    int(row[4]) if row[4] is not None else None
+                )
+            except (TypeError, ValueError):
+                viva = None
+
+            attendance = (
+                float(attendance_map.get(sbrn, 0.0))
+                if scheme["has_attendance"]
+                else 0.0
+            )
+
+            total = round(
+                float(performance or 0)
+                + float(report or 0)
+                + float(viva or 0)
+                + attendance,
+                2,
+            )
+
+            result.append({
+                "sbrn": sbrn,
+                "name": row[1],
+                "performance": performance,
+                "report": report,
+                "viva": viva,
+                "attendance": attendance,
+                "total": total,
+            })
+
+        print(
+            "📊 PRACTICAL MARKS LOAD → "
+            f"Faculty={faculty_id} | "
+            f"Department={department} | "
+            f"Semester={semester} | "
+            f"Subject={subject_id} | "
+            f"Section={section} | "
+            f"Practical={practical_number} | "
+            f"Rows={len(result)}"
+        )
+
+        return {
+            "status": "success",
+            "faculty_id": faculty_id,
+            "department": department,
+            "semester": semester,
+            "subject_id": subject_id,
+            "section": section,
+            "practical_number": practical_number,
+            **scheme,
+            "students": result,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print(
+            "❌ GET /practical-marks ERROR:",
+            str(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load practical marks: {str(e)}"
+        )
+
+    finally:
+        release_db(conn)
+
+
+# ======================================================
+# SAVE PRACTICAL MARKS
+# ======================================================
+
+@app.post("/practical-marks")
+def save_practical_marks(
+    payload: dict = Body(...),
+):
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid practical marks payload"
+        )
+
+    faculty_id = str(payload.get("faculty_id") or "").strip()
+    department = str(payload.get("department") or "").strip()
+    semester = str(payload.get("semester") or "").strip()
+    subject_id = str(payload.get("subject_id") or "").strip()
+    section = str(payload.get("section") or "").strip()
+    practical_number = str(
+        payload.get("practical_number") or ""
+    ).strip()
+    records = payload.get("students")
+
+    if not all([
+        faculty_id,
+        department,
+        semester,
+        subject_id,
+        section,
+        practical_number,
+    ]):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "faculty_id, department, semester, subject_id, "
+                "section and practical_number are required"
+            )
+        )
+
+    if practical_number not in {
+        f"Practical {i}" for i in range(1, 16)
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="practical_number must be Practical 1 through Practical 15"
+        )
+
+    if not isinstance(records, list):
+        raise HTTPException(
+            status_code=400,
+            detail="students must be a list"
+        )
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        _verify_practical_faculty_assignment(
+            cur,
+            faculty_id,
+            department,
+            semester,
+            subject_id,
+            section,
+        )
+
+        scheme = _practical_scheme(semester)
+
+        limits = {
+            "performance": scheme["performance_max"],
+            "report": scheme["report_max"],
+            "viva": scheme["viva_max"],
+        }
+
+        performance_type = (
+            f"{practical_number} – Practical Performance"
+        )
+        report_type = (
+            f"{practical_number} – Practical Report"
+        )
+        viva_type = (
+            f"{practical_number} – Practical Viva"
+        )
+
+        exam_types = [
+            ("performance", performance_type, limits["performance"]),
+            ("report", report_type, limits["report"]),
+            ("viva", viva_type, limits["viva"]),
+        ]
+
+        now = datetime.now()
+        exam_date = now.date().isoformat()
+
+        saved_components = 0
+        saved_students = 0
+
+        for item in records:
+
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Each student record must be an object"
+                )
+
+            sbrn = str(item.get("sbrn") or "").strip()
+
+            if not sbrn:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Student SBRN is required"
+                )
+
+            # --------------------------------------------------
+            # Student authorization / active-status validation
+            # --------------------------------------------------
+            cur.execute("""
+                SELECT 1
+                FROM students
+                WHERE LOWER(TRIM(sbrn)) = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(COALESCE(department, '')))
+                        = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(COALESCE(semester, '')))
+                        = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(COALESCE(section, '')))
+                        = LOWER(TRIM(%s))
+                  AND COALESCE(status_locked, 0) = 0
+                  AND UPPER(TRIM(COALESCE(academic_status, 'ACTIVE')))
+                        = 'ACTIVE'
+                LIMIT 1
+            """, (
+                sbrn,
+                department,
+                semester,
+                section,
+            ))
+
+            if cur.fetchone() is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Student {sbrn} is not an active student "
+                        "of the selected section."
+                    )
+                )
+
+            student_has_component = False
+
+            for key, full_exam_type, max_marks in exam_types:
+
+                raw_value = item.get(key)
+
+                # Null/blank explicitly clears the saved component.
+                if raw_value is None or str(raw_value).strip() == "":
+                    cur.execute("""
+                        DELETE FROM exam_marks
+                        WHERE LOWER(TRIM(sbrn)) = LOWER(TRIM(%s))
+                          AND LOWER(TRIM(semester)) = LOWER(TRIM(%s))
+                          AND LOWER(TRIM(exam_type)) = LOWER(TRIM(%s))
+                          AND LOWER(TRIM(COALESCE(subject_id, '')))
+                                = LOWER(TRIM(%s))
+                    """, (
+                        sbrn,
+                        semester,
+                        full_exam_type,
+                        subject_id,
+                    ))
+                    continue
+
+                try:
+                    numeric = float(raw_value)
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Invalid {key} marks for {sbrn}."
+                        )
+                    )
+
+                if not numeric.is_integer():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"{key.title()} marks must be a whole number "
+                            f"for {sbrn}."
+                        )
+                    )
+
+                marks = int(numeric)
+
+                if marks < 0 or marks > max_marks:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"{key.title()} marks must be 0–{max_marks} "
+                            f"for {sbrn}."
+                        )
+                    )
+
+                # --------------------------------------------------
+                # Existing desktop-aligned storage:
+                # exam_marks(sbrn, semester, exam_type, subject_id)
+                # --------------------------------------------------
+                # The current PostgreSQL exam_marks table does not rely on
+                # a UNIQUE constraint for this logical key, so use an
+                # explicit lookup + UPDATE/INSERT. This also avoids creating
+                # duplicate practical records.
+                cur.execute("""
+                    SELECT id, version
+                    FROM exam_marks
+                    WHERE LOWER(TRIM(sbrn)) = LOWER(TRIM(%s))
+                      AND LOWER(TRIM(semester)) = LOWER(TRIM(%s))
+                      AND LOWER(TRIM(exam_type)) = LOWER(TRIM(%s))
+                      AND LOWER(TRIM(COALESCE(subject_id, '')))
+                            = LOWER(TRIM(%s))
+                    ORDER BY id DESC
+                    LIMIT 1
+                """, (
+                    sbrn,
+                    semester,
+                    full_exam_type,
+                    subject_id,
+                ))
+
+                existing = cur.fetchone()
+
+                if existing is not None:
+                    cur.execute("""
+                        UPDATE exam_marks
+                        SET
+                            marks = %s,
+                            max_marks = %s,
+                            exam_date = %s,
+                            last_updated = %s,
+                            version = COALESCE(version, 0) + 1,
+                            sync_pending = 0
+                        WHERE id = %s
+                    """, (
+                        marks,
+                        max_marks,
+                        exam_date,
+                        now,
+                        existing[0],
+                    ))
+                else:
+                    cur.execute("""
+                        INSERT INTO exam_marks
+                            (
+                                sbrn, semester, exam_type, subject_id,
+                                marks, max_marks, exam_date,
+                                last_updated, version, sync_pending
+                            )
+                        VALUES
+                            (%s, %s, %s, %s, %s, %s, %s, %s, 1, 0)
+                    """, (
+                        sbrn,
+                        semester,
+                        full_exam_type,
+                        subject_id,
+                        marks,
+                        max_marks,
+                        exam_date,
+                        now,
+                    ))
+
+                saved_components += 1
+                student_has_component = True
+
+            if student_has_component:
+                saved_students += 1
+
+        conn.commit()
+
+        # --------------------------------------------------
+        # Realtime notification
+        # --------------------------------------------------
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                broadcast_event("exam_marks")
+            )
+        except RuntimeError:
+            pass
+
+        print(
+            "💾 PRACTICAL MARKS SAVED → "
+            f"Faculty={faculty_id} | "
+            f"Department={department} | "
+            f"Semester={semester} | "
+            f"Subject={subject_id} | "
+            f"Section={section} | "
+            f"Practical={practical_number} | "
+            f"Students={saved_students} | "
+            f"Components={saved_components}"
+        )
+
+        return {
+            "status": "success",
+            "message": "Practical marks saved successfully",
+            "faculty_id": faculty_id,
+            "department": department,
+            "semester": semester,
+            "subject_id": subject_id,
+            "section": section,
+            "practical_number": practical_number,
+            "students_saved": saved_students,
+            "components_saved": saved_components,
+            **scheme,
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+
+    except Exception as e:
+
+        conn.rollback()
+
+        print(
+            "❌ POST /practical-marks ERROR:",
+            str(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save practical marks: {str(e)}"
         )
 
     finally:
