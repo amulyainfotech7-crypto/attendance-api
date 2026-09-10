@@ -2046,6 +2046,247 @@ def get_faculty_workload(faculty_id: str):
     finally:
         release_db(conn)
 
+
+# ======================================================
+# PRACTICAL MARKS SUBJECTS
+# FACULTY + DEPARTMENT + SEMESTER
+# ======================================================
+
+@app.get("/practical-subjects")
+def get_practical_subjects(
+    faculty_id: str,
+    department: str,
+    semester: str
+):
+    """
+    Return practical/lab subjects assigned to the logged-in
+    faculty for the selected department and semester.
+
+    IMPORTANT:
+        This endpoint is ONLY for Practical Marks.
+
+        It does NOT modify:
+            - attendance
+            - timetable
+            - faculty workload
+            - students
+            - WebSocket logic
+            - existing synchronization
+    """
+
+    faculty_id = str(faculty_id or "").strip()
+    department = str(department or "").strip()
+    semester = str(semester or "").strip()
+
+    # --------------------------------------------------
+    # VALIDATION
+    # --------------------------------------------------
+
+    if not faculty_id:
+        raise HTTPException(
+            status_code=400,
+            detail="faculty_id is required"
+        )
+
+    if not department:
+        raise HTTPException(
+            status_code=400,
+            detail="department is required"
+        )
+
+    if not semester:
+        raise HTTPException(
+            status_code=400,
+            detail="semester is required"
+        )
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        # ==================================================
+        # PRACTICAL SUBJECTS
+        #
+        # timetable_slots is used as the authoritative
+        # faculty assignment source.
+        #
+        # Only LAB / PRACTICAL subjects are returned.
+        # ==================================================
+
+        cur.execute("""
+            SELECT
+                t.subject_id,
+                COALESCE(
+                    NULLIF(TRIM(s.subject_name), ''),
+                    TRIM(t.subject_id)
+                ) AS subject_name,
+                TRIM(t.section) AS section,
+                COALESCE(
+                    NULLIF(TRIM(t.type), ''),
+                    NULLIF(TRIM(s.type), '')
+                ) AS subject_type
+            FROM timetable_slots t
+
+            LEFT JOIN subjects s
+                ON LOWER(TRIM(s.subject_id))
+                   = LOWER(TRIM(t.subject_id))
+               AND LOWER(TRIM(s.department))
+                   = LOWER(TRIM(t.department))
+               AND LOWER(TRIM(s.semester))
+                   = LOWER(TRIM(t.semester))
+
+            WHERE LOWER(TRIM(t.faculty_id))
+                  = LOWER(TRIM(%s))
+
+              AND LOWER(TRIM(t.department))
+                  = LOWER(TRIM(%s))
+
+              AND LOWER(TRIM(t.semester))
+                  = LOWER(TRIM(%s))
+
+              AND t.subject_id IS NOT NULL
+              AND TRIM(t.subject_id) <> ''
+
+              AND (
+                    LOWER(TRIM(COALESCE(t.type, '')))
+                        IN ('lab', 'practical')
+                    OR
+                    LOWER(TRIM(COALESCE(s.type, '')))
+                        IN ('lab', 'practical')
+                    OR
+                    LOWER(TRIM(COALESCE(t.subject_id, '')))
+                        LIKE '%%_P'
+                  )
+
+              AND t.section IS NOT NULL
+              AND TRIM(t.section) <> ''
+
+            GROUP BY
+                t.subject_id,
+                s.subject_name,
+                t.section,
+                t.type,
+                s.type
+
+            ORDER BY
+                t.subject_id,
+                t.section
+        """, (
+            faculty_id,
+            department,
+            semester
+        ))
+
+        rows = cur.fetchall()
+
+        # ==================================================
+        # GROUP SECTIONS UNDER EACH SUBJECT
+        # ==================================================
+
+        subjects_map = {}
+
+        for row in rows:
+
+            subject_id = (
+                str(row[0]).strip()
+                if row[0] is not None
+                else ""
+            )
+
+            subject_name = (
+                str(row[1]).strip()
+                if row[1] is not None
+                else subject_id
+            )
+
+            section = (
+                str(row[2]).strip()
+                if row[2] is not None
+                else ""
+            )
+
+            subject_type = (
+                str(row[3]).strip()
+                if row[3] is not None
+                else "LAB"
+            )
+
+            if not subject_id:
+                continue
+
+            if subject_id not in subjects_map:
+
+                subjects_map[subject_id] = {
+                    "subject_id": subject_id,
+                    "subject_name": subject_name,
+                    "type": subject_type,
+                    "sections": []
+                }
+
+            if (
+                section
+                and section not in subjects_map[subject_id]["sections"]
+            ):
+                subjects_map[subject_id]["sections"].append(section)
+
+        result = list(subjects_map.values())
+
+        # ==================================================
+        # SORT SECTIONS
+        # ==================================================
+
+        for item in result:
+            item["sections"] = sorted(
+                item["sections"],
+                key=lambda x: str(x).lower()
+            )
+
+        # ==================================================
+        # DEBUG
+        # ==================================================
+
+        print("\n" + "=" * 80)
+        print("🧪 PRACTICAL MARKS SUBJECTS")
+        print("=" * 80)
+        print(f"Faculty ID : {faculty_id}")
+        print(f"Department : {department}")
+        print(f"Semester   : {semester}")
+        print(f"Subjects   : {len(result)}")
+
+        for item in result:
+            print(
+                f"   → {item['subject_name']} "
+                f"({item['subject_id']}) | "
+                f"Sections: {item['sections']}"
+            )
+
+        print("=" * 80)
+
+        return {
+            "status": "success",
+            "faculty_id": faculty_id,
+            "department": department,
+            "semester": semester,
+            "subjects": result
+        }
+
+    except Exception as e:
+
+        print(
+            "❌ GET /practical-subjects ERROR:",
+            e
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load practical subjects: {str(e)}"
+        )
+
+    finally:
+        release_db(conn)
+
+
 # ======================================================
 # GET DEPARTMENTS
 # ======================================================
