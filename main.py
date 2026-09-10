@@ -1523,6 +1523,72 @@ def startup():
 
 
         # ======================================================
+        # EXAM MARKS ID / SEQUENCE SAFETY
+        #
+        # Legacy imports or synchronization can leave the PostgreSQL
+        # exam_marks sequence behind MAX(id). Repair it at startup.
+        # ======================================================
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = 'exam_marks'
+            )
+        """)
+
+        exam_marks_exists = cur.fetchone()[0]
+
+        if exam_marks_exists:
+            cur.execute("""
+                SELECT COALESCE(MAX(id), 0)
+                FROM exam_marks
+            """)
+
+            exam_marks_max_row = cur.fetchone()
+            exam_marks_max_id = (
+                int(exam_marks_max_row[0])
+                if exam_marks_max_row and exam_marks_max_row[0] is not None
+                else 0
+            )
+
+            cur.execute("""
+                SELECT pg_get_serial_sequence('exam_marks', 'id')
+            """)
+
+            exam_marks_sequence_row = cur.fetchone()
+            exam_marks_sequence = (
+                exam_marks_sequence_row[0]
+                if exam_marks_sequence_row
+                else None
+            )
+
+            if exam_marks_sequence:
+                if exam_marks_max_id > 0:
+                    cur.execute(
+                        "SELECT setval(%s, %s, true)",
+                        (
+                            exam_marks_sequence,
+                            exam_marks_max_id,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT setval(%s, 1, false)",
+                        (exam_marks_sequence,),
+                    )
+
+                print(
+                    "✅ exam_marks ID sequence synchronized → "
+                    f"MAX(id)={exam_marks_max_id}"
+                )
+            else:
+                print(
+                    "⚠️ exam_marks serial sequence was not found; "
+                    "POST /practical-marks uses explicit ID allocation."
+                )
+
+        # ======================================================
         # PERFORMANCE INDEXES
         # ======================================================
 
@@ -2859,16 +2925,54 @@ def save_practical_marks(
                         existing[0],
                     ))
                 else:
+                    # --------------------------------------------------
+                    # SAFE PostgreSQL ID ALLOCATION
+                    #
+                    # exam_marks.id is only a cloud-side surrogate ID.
+                    # Local SQLite IDs must NEVER be copied here.
+                    #
+                    # Older imports/synchronization can leave the
+                    # PostgreSQL sequence behind MAX(id), so do not rely
+                    # on the sequence for this insert.
+                    #
+                    # The transaction advisory lock makes MAX(id)+1 safe
+                    # when two Faculty App saves happen concurrently.
+                    # --------------------------------------------------
+                    cur.execute("""
+                        SELECT pg_advisory_xact_lock(7465321)
+                    """)
+
+                    cur.execute("""
+                        SELECT COALESCE(MAX(id), 0) + 1
+                        FROM exam_marks
+                    """)
+
+                    next_id_row = cur.fetchone()
+
+                    if not next_id_row or next_id_row[0] is None:
+                        next_id = 1
+                    else:
+                        next_id = int(next_id_row[0])
+
                     cur.execute("""
                         INSERT INTO exam_marks
                             (
-                                sbrn, semester, exam_type, subject_id,
-                                marks, max_marks, exam_date,
-                                last_updated, version, sync_pending
+                                id,
+                                sbrn,
+                                semester,
+                                exam_type,
+                                subject_id,
+                                marks,
+                                max_marks,
+                                exam_date,
+                                last_updated,
+                                version,
+                                sync_pending
                             )
                         VALUES
-                            (%s, %s, %s, %s, %s, %s, %s, %s, 1, 0)
+                            (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 0)
                     """, (
+                        next_id,
                         sbrn,
                         semester,
                         full_exam_type,
@@ -2878,6 +2982,16 @@ def save_practical_marks(
                         exam_date,
                         now,
                     ))
+
+                    # Synchronize the serial sequence with the explicit
+                    # ID so future normal inserts cannot reuse this ID.
+                    cur.execute("""
+                        SELECT setval(
+                            pg_get_serial_sequence('exam_marks', 'id'),
+                            %s,
+                            true
+                        )
+                    """, (next_id,))
 
                 saved_components += 1
                 student_has_component = True
