@@ -2711,15 +2711,6 @@ def save_practical_marks(
         saved_components = 0
         saved_students = 0
 
-        # --------------------------------------------------
-        # PostgreSQL safety: exam_marks may have an out-of-sync
-        # SERIAL/identity sequence because older sync/import jobs
-        # inserted explicit IDs. Serialize this save transaction and
-        # allocate any new ID from MAX(id), so a stale sequence can
-        # never cause: duplicate key value violates exam_marks_pkey.
-        # --------------------------------------------------
-        cur.execute("SELECT pg_advisory_xact_lock(hashtext('faculty_app.exam_marks_insert'))")
-
         for item in records:
 
             if not isinstance(item, dict):
@@ -2868,29 +2859,16 @@ def save_practical_marks(
                         existing[0],
                     ))
                 else:
-                    # Allocate the primary key explicitly from the current
-                    # maximum ID. This is intentionally used instead of the
-                    # PostgreSQL sequence because legacy imports/sync can leave
-                    # that sequence behind the actual MAX(id). The transaction
-                    # advisory lock above makes this allocation safe for
-                    # concurrent Faculty App saves using this endpoint.
-                    cur.execute("""
-                        SELECT COALESCE(MAX(id), 0) + 1
-                        FROM exam_marks
-                    """)
-                    next_id = int(cur.fetchone()[0])
-
                     cur.execute("""
                         INSERT INTO exam_marks
                             (
-                                id, sbrn, semester, exam_type, subject_id,
+                                sbrn, semester, exam_type, subject_id,
                                 marks, max_marks, exam_date,
                                 last_updated, version, sync_pending
                             )
                         VALUES
-                            (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 0)
+                            (%s, %s, %s, %s, %s, %s, %s, %s, 1, 0)
                     """, (
-                        next_id,
                         sbrn,
                         semester,
                         full_exam_type,
