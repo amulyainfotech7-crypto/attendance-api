@@ -8091,7 +8091,6 @@ def diagnostic_attendance_transfer_in(
 # UNIVERSAL SYNC DOWNLOAD
 # TIMETABLE-SAFE VERSION
 # ======================================================
-
 @app.get("/sync-generic/{table_name}")
 def universal_sync_download(
     table_name: str,
@@ -8107,7 +8106,7 @@ def universal_sync_download(
         # ==================================================
 
         # Only allow normal PostgreSQL identifier characters.
-        # This also keeps the dynamic SELECT safe.
+        # This keeps the dynamic SELECT safe.
         import re
 
         if not re.fullmatch(
@@ -8217,25 +8216,55 @@ def universal_sync_download(
         )
 
         # ==================================================
-        # 6. DEBUG
+        # 6. DEBUG INFORMATION
         # ==================================================
 
         print("\n" + "=" * 80)
         print("☁ UNIVERSAL CLOUD DOWNLOAD")
         print("=" * 80)
-        print("Table            :", table_name)
-        print("Since            :", since)
-        print("Table exists     :", table_exists)
-        print("Has last_updated :", has_last_updated)
 
+        print(
+            "Table            :",
+            table_name
+        )
+
+        print(
+            "Since            :",
+            since
+        )
+
+        print(
+            "Table exists     :",
+            table_exists
+        )
+
+        print(
+            "Has last_updated :",
+            has_last_updated
+        )
+
+        print(
+            "Columns          :",
+            ", ".join(columns_in_table)
+        )
+
+        # Special timetable diagnostics
         if table_name == "timetable_slots":
 
             print(
                 "🕒 TIMETABLE CLOUD DOWNLOAD REQUEST"
             )
 
+        # Special subject-semester-map diagnostics
+        if table_name == "subject_semester_map":
+
+            print(
+                "📚 SUBJECT_SEMESTER_MAP "
+                "CLOUD DOWNLOAD REQUEST"
+            )
+
         # ==================================================
-        # 7. BUILD QUERY
+        # 7. BUILD BASE QUERY
         # ==================================================
 
         query = (
@@ -8292,7 +8321,7 @@ def universal_sync_download(
                 )
 
             # ------------------------------------------------
-            # TEXT / VARCHAR
+            # TEXT / VARCHAR / OTHER
             # ------------------------------------------------
 
             else:
@@ -8322,12 +8351,17 @@ def universal_sync_download(
             """
 
         # ==================================================
-        # 10. EXECUTE
+        # 10. EXECUTE QUERY
         # ==================================================
 
         print(
             "☁ Executing:",
             query
+        )
+
+        print(
+            "☁ Parameters:",
+            params
         )
 
         cur.execute(
@@ -8337,20 +8371,31 @@ def universal_sync_download(
 
         rows = cur.fetchall() or []
 
-        columns = [
-            description[0]
-            for description in cur.description
-        ]
+        # ==================================================
+        # 11. GET RESULT COLUMNS
+        # ==================================================
+
+        if cur.description:
+
+            columns = [
+                description[0]
+                for description in cur.description
+            ]
+
+        else:
+
+            columns = []
 
         print(
             f"☁ Rows returned: {len(rows)}"
         )
 
         # ==================================================
-        # 11. BUILD JSON-SAFE RECORDS
+        # 12. BUILD JSON-SAFE RECORDS
         # ==================================================
 
         records = []
+
         latest_sync = None
 
         for row in rows:
@@ -8362,6 +8407,10 @@ def universal_sync_download(
                 )
             )
 
+            # ----------------------------------------------
+            # Convert PostgreSQL values to JSON-safe values
+            # ----------------------------------------------
+
             for key, value in list(
                 record.items()
             ):
@@ -8369,6 +8418,7 @@ def universal_sync_download(
                 if value is None:
                     continue
 
+                # datetime / date / time
                 if hasattr(
                     value,
                     "isoformat"
@@ -8383,6 +8433,25 @@ def universal_sync_download(
                     except Exception:
                         pass
 
+                # Decimal
+                elif hasattr(
+                    value,
+                    "as_tuple"
+                ):
+
+                    try:
+
+                        record[key] = float(
+                            value
+                        )
+
+                    except Exception:
+                        pass
+
+            # ----------------------------------------------
+            # Track latest synchronization timestamp
+            # ----------------------------------------------
+
             if (
                 "last_updated" in record
                 and record["last_updated"] is not None
@@ -8392,10 +8461,12 @@ def universal_sync_download(
                     record["last_updated"]
                 )
 
-            records.append(record)
+            records.append(
+                record
+            )
 
         # ==================================================
-        # 12. TIMETABLE DEBUG
+        # 13. TABLE-SPECIFIC DEBUGGING
         # ==================================================
 
         if table_name == "timetable_slots":
@@ -8414,11 +8485,67 @@ def universal_sync_download(
                 latest_sync
             )
 
+        if table_name == "subject_semester_map":
+
+            print(
+                "📚 SUBJECT_SEMESTER_MAP "
+                "DOWNLOAD SUCCESS"
+            )
+
+            print(
+                "   Rows   :",
+                len(records)
+            )
+
+            print(
+                "   Latest :",
+                latest_sync
+            )
+
+            # Print a small diagnostic preview.
+            # This does not modify the data.
+            if records:
+
+                print(
+                    "   Preview:"
+                )
+
+                for record in records[:10]:
+
+                    print(
+                        "    ",
+                        {
+                            "subject_id":
+                                record.get(
+                                    "subject_id"
+                                ),
+                            "semester":
+                                record.get(
+                                    "semester"
+                                ),
+                            "department":
+                                record.get(
+                                    "department"
+                                ),
+                            "section":
+                                record.get(
+                                    "section"
+                                ),
+                        }
+                    )
+
+            else:
+
+                print(
+                    "   ⚠ No subject-semester "
+                    "mappings returned from Cloud."
+                )
+
         # ==================================================
-        # 13. RESPONSE
+        # 14. RESPONSE
         # ==================================================
 
-        return {
+        response = {
             "status": "success",
             "table": table_name,
             "count": len(records),
@@ -8426,29 +8553,73 @@ def universal_sync_download(
             "records": records
         }
 
+        print(
+            "☁ Cloud download response prepared"
+        )
+
+        print(
+            "   Table:",
+            table_name
+        )
+
+        print(
+            "   Count:",
+            len(records)
+        )
+
+        print(
+            "=" * 80
+        )
+
+        return response
+
     # ==================================================
-    # 14. PRESERVE HTTP ERRORS
+    # 15. PRESERVE HTTP ERRORS
     # ==================================================
 
     except HTTPException:
+
         raise
 
     # ==================================================
-    # 15. OTHER SERVER / DATABASE ERROR
+    # 16. OTHER SERVER / DATABASE ERROR
     # ==================================================
 
     except Exception as e:
 
         print("\n" + "=" * 80)
-        print("❌ UNIVERSAL CLOUD DOWNLOAD FAILED")
+        print(
+            "❌ UNIVERSAL CLOUD DOWNLOAD FAILED"
+        )
         print("=" * 80)
-        print("Table :", table_name)
-        print("Since :", since)
-        print("Error :", repr(e))
+
+        print(
+            "Table :",
+            table_name
+        )
+
+        print(
+            "Since :",
+            since
+        )
+
+        print(
+            "Error :",
+            repr(e)
+        )
 
         import traceback
 
         traceback.print_exc()
+
+        # Roll back any transaction state that may
+        # have been left open by PostgreSQL.
+        if conn:
+
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
         raise HTTPException(
             status_code=500,
@@ -8456,7 +8627,7 @@ def universal_sync_download(
         )
 
     # ==================================================
-    # 16. RELEASE CONNECTION
+    # 17. RELEASE CONNECTION
     # ==================================================
 
     finally:
@@ -8464,9 +8635,15 @@ def universal_sync_download(
         if conn:
 
             try:
-                release_db(conn)
+
+                release_db(
+                    conn
+                )
+
             except Exception:
+
                 pass
+
 
 # ======================================================
 # 🔥 RESULT SUBJECTS SYNC
