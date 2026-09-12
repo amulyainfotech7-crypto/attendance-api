@@ -8089,7 +8089,7 @@ def diagnostic_attendance_transfer_in(
 
 # ======================================================
 # UNIVERSAL SYNC DOWNLOAD
-# TIMETABLE-SAFE + DELTA-SAFE VERSION
+# TIMETABLE-SAFE VERSION
 # ======================================================
 
 @app.get("/sync-generic/{table_name}")
@@ -8098,31 +8098,83 @@ def universal_sync_download(
     since: Optional[str] = None
 ):
 
-    # ==================================================
-    # 1. VALIDATE TABLE
-    # ==================================================
-
-    allowed_tables = get_sync_tables()
-
-    if table_name not in allowed_tables:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid table"
-        )
-
     conn = None
 
     try:
 
         # ==================================================
-        # 2. CONNECT DATABASE
+        # 1. BASIC TABLE NAME VALIDATION
+        # ==================================================
+
+        # Only allow normal PostgreSQL identifier characters.
+        # This also keeps the dynamic SELECT safe.
+        import re
+
+        if not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*",
+            table_name
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid table name"
+            )
+
+        # ==================================================
+        # 2. CONNECT TO CLOUD DATABASE
         # ==================================================
 
         conn = connect_db()
         cur = conn.cursor()
 
         # ==================================================
-        # 3. GET ACTUAL TABLE COLUMNS
+        # 3. VERIFY THAT THE TABLE ACTUALLY EXISTS
+        # ==================================================
+
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name = %s
+            )
+            """,
+            (table_name,)
+        )
+
+        table_exists = cur.fetchone()[0]
+
+        if not table_exists:
+
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Cloud table '{table_name}' "
+                    f"does not exist."
+                )
+            )
+
+        # ==================================================
+        # 4. PROTECT PRIVATE TABLES
+        # ==================================================
+
+        protected_tables = {
+            "users",
+            "pg_stat_statements",
+        }
+
+        if table_name in protected_tables:
+
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Table '{table_name}' "
+                    f"is not available for sync."
+                )
+            )
+
+        # ==================================================
+        # 5. GET TABLE COLUMNS
         # ==================================================
 
         cur.execute(
@@ -8141,9 +8193,13 @@ def universal_sync_download(
         column_info = cur.fetchall()
 
         if not column_info:
+
             raise HTTPException(
                 status_code=404,
-                detail=f"Table '{table_name}' not found"
+                detail=(
+                    f"No columns found for "
+                    f"table '{table_name}'."
+                )
             )
 
         columns_in_table = [
@@ -8161,36 +8217,35 @@ def universal_sync_download(
         )
 
         # ==================================================
-        # 4. DEBUG INFORMATION
+        # 6. DEBUG
         # ==================================================
 
         print("\n" + "=" * 80)
         print("☁ UNIVERSAL CLOUD DOWNLOAD")
         print("=" * 80)
-        print("Table:", table_name)
-        print("Since:", since)
-        print(
-            "Has last_updated:",
-            has_last_updated
-        )
+        print("Table            :", table_name)
+        print("Since            :", since)
+        print("Table exists     :", table_exists)
+        print("Has last_updated :", has_last_updated)
 
         if table_name == "timetable_slots":
+
             print(
-                "🕒 TIMETABLE SYNC REQUEST RECEIVED"
+                "🕒 TIMETABLE CLOUD DOWNLOAD REQUEST"
             )
 
         # ==================================================
-        # 5. BUILD SELECT QUERY
+        # 7. BUILD QUERY
         # ==================================================
 
-        base_query = (
+        query = (
             f'SELECT * FROM "{table_name}"'
         )
 
         params = ()
 
         # ==================================================
-        # 6. INCREMENTAL SYNC
+        # 8. INCREMENTAL SYNC
         # ==================================================
 
         if since and has_last_updated:
@@ -8211,10 +8266,6 @@ def universal_sync_download(
                     )
                 )
 
-            # ------------------------------------------------
-            # TIMESTAMP / TIMESTAMPTZ
-            # ------------------------------------------------
-
             last_updated_type = (
                 column_types.get(
                     "last_updated",
@@ -8222,13 +8273,17 @@ def universal_sync_download(
                 ).lower()
             )
 
+            # ------------------------------------------------
+            # PostgreSQL DATE / TIMESTAMP
+            # ------------------------------------------------
+
             if last_updated_type in (
+                "date",
                 "timestamp without time zone",
                 "timestamp with time zone",
-                "date",
             ):
 
-                base_query += """
+                query += """
                     WHERE last_updated > %s
                 """
 
@@ -8237,16 +8292,12 @@ def universal_sync_download(
                 )
 
             # ------------------------------------------------
-            # TEXT / VARCHAR LAST_UPDATED
-            # ------------------------------------------------
-            #
-            # Some older databases may store timestamps
-            # as TEXT. In that case compare ISO strings.
+            # TEXT / VARCHAR
             # ------------------------------------------------
 
             else:
 
-                base_query += """
+                query += """
                     WHERE last_updated > %s
                 """
 
@@ -8255,35 +8306,32 @@ def universal_sync_download(
                 )
 
         # ==================================================
-        # 7. ORDER RESULTS
+        # 9. ORDERING
         # ==================================================
 
         if has_last_updated:
 
-            base_query += """
+            query += """
                 ORDER BY last_updated ASC
             """
 
         else:
 
-            base_query += """
+            query += """
                 ORDER BY 1
             """
 
         # ==================================================
-        # 8. EXECUTE QUERY
+        # 10. EXECUTE
         # ==================================================
 
         print(
-            "☁ Executing Cloud query:"
-        )
-
-        print(
-            base_query
+            "☁ Executing:",
+            query
         )
 
         cur.execute(
-            base_query,
+            query,
             params
         )
 
@@ -8295,11 +8343,11 @@ def universal_sync_download(
         ]
 
         print(
-            f"☁ Cloud rows returned: {len(rows)}"
+            f"☁ Rows returned: {len(rows)}"
         )
 
         # ==================================================
-        # 9. CONVERT DATABASE ROWS TO JSON-SAFE RECORDS
+        # 11. BUILD JSON-SAFE RECORDS
         # ==================================================
 
         records = []
@@ -8313,11 +8361,6 @@ def universal_sync_download(
                     row
                 )
             )
-
-            # ----------------------------------------------
-            # Convert datetime/date/time values
-            # to JSON-safe ISO strings
-            # ----------------------------------------------
 
             for key, value in list(
                 record.items()
@@ -8340,10 +8383,6 @@ def universal_sync_download(
                     except Exception:
                         pass
 
-            # ----------------------------------------------
-            # Latest sync cursor
-            # ----------------------------------------------
-
             if (
                 "last_updated" in record
                 and record["last_updated"] is not None
@@ -8353,30 +8392,30 @@ def universal_sync_download(
                     record["last_updated"]
                 )
 
-            records.append(
-                record
-            )
+            records.append(record)
 
         # ==================================================
-        # 10. TIMETABLE-SPECIFIC DEBUG
+        # 12. TIMETABLE DEBUG
         # ==================================================
 
         if table_name == "timetable_slots":
 
             print(
-                "🕒 TIMETABLE CLOUD DOWNLOAD COMPLETE"
+                "🕒 TIMETABLE DOWNLOAD SUCCESS"
             )
 
             print(
-                f"   Rows returned : {len(records)}"
+                "   Rows   :",
+                len(records)
             )
 
             print(
-                f"   Latest sync   : {latest_sync}"
+                "   Latest :",
+                latest_sync
             )
 
         # ==================================================
-        # 11. FINAL RESPONSE
+        # 13. RESPONSE
         # ==================================================
 
         return {
@@ -8388,14 +8427,14 @@ def universal_sync_download(
         }
 
     # ==================================================
-    # 12. PRESERVE HTTP EXCEPTIONS
+    # 14. PRESERVE HTTP ERRORS
     # ==================================================
 
     except HTTPException:
         raise
 
     # ==================================================
-    # 13. DATABASE / SERVER ERROR
+    # 15. OTHER SERVER / DATABASE ERROR
     # ==================================================
 
     except Exception as e:
@@ -8403,12 +8442,9 @@ def universal_sync_download(
         print("\n" + "=" * 80)
         print("❌ UNIVERSAL CLOUD DOWNLOAD FAILED")
         print("=" * 80)
-        print("Table:", table_name)
-        print("Since:", since)
-        print(
-            "Error:",
-            repr(e)
-        )
+        print("Table :", table_name)
+        print("Since :", since)
+        print("Error :", repr(e))
 
         import traceback
 
@@ -8420,7 +8456,7 @@ def universal_sync_download(
         )
 
     # ==================================================
-    # 14. ALWAYS RELEASE DATABASE CONNECTION
+    # 16. RELEASE CONNECTION
     # ==================================================
 
     finally:
