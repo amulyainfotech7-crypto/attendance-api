@@ -548,7 +548,451 @@ def is_working_day(check_date: dt_date, department: str, semester: str):
         release_db(conn)
 
 
+# ======================================================
+# SUBJECT → SEMESTER → DEPARTMENT MAP
+# CLOUD AUTHORITATIVE SCHEMA
+# PERMANENT / FRESH-DATABASE SAFE
+# ======================================================
 
+def ensure_subject_semester_map(conn, cur):
+    """
+    =========================================================
+    PERMANENT SUBJECT-SEMESTER-DEPARTMENT MAPPING
+    =========================================================
+
+    Cloud PostgreSQL is the authoritative source.
+
+    Logical identity:
+
+        subject_id
+        semester
+        department
+        section
+
+    IMPORTANT:
+        - Local SQLite id is NOT used.
+        - This table survives deletion/recreation of local DB.
+        - Fresh desktop installations restore mappings from Cloud.
+        - Existing mappings are preserved.
+        - Existing subject master data is NOT deleted.
+        - This function is IDEMPOTENT and safe to run at every startup.
+    """
+
+    print("\n" + "=" * 80)
+    print("📚 CHECKING SUBJECT_SEMESTER_MAP")
+    print("=" * 80)
+
+    # ======================================================
+    # 1. CREATE CLOUD TABLE
+    # ======================================================
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS subject_semester_map (
+            subject_id TEXT NOT NULL,
+            semester TEXT NOT NULL,
+            department TEXT NOT NULL,
+            section TEXT NOT NULL DEFAULT 'ALL',
+
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            version INTEGER DEFAULT 1,
+            sync_pending INTEGER DEFAULT 0,
+
+            PRIMARY KEY (
+                subject_id,
+                semester,
+                department,
+                section
+            )
+        )
+    """)
+
+    # ======================================================
+    # 2. SAFE COLUMN MIGRATION
+    # ======================================================
+
+    cur.execute("""
+        ALTER TABLE subject_semester_map
+        ADD COLUMN IF NOT EXISTS subject_id TEXT
+    """)
+
+    cur.execute("""
+        ALTER TABLE subject_semester_map
+        ADD COLUMN IF NOT EXISTS semester TEXT
+    """)
+
+    cur.execute("""
+        ALTER TABLE subject_semester_map
+        ADD COLUMN IF NOT EXISTS department TEXT
+    """)
+
+    cur.execute("""
+        ALTER TABLE subject_semester_map
+        ADD COLUMN IF NOT EXISTS section TEXT DEFAULT 'ALL'
+    """)
+
+    cur.execute("""
+        ALTER TABLE subject_semester_map
+        ADD COLUMN IF NOT EXISTS last_updated
+        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    """)
+
+    cur.execute("""
+        ALTER TABLE subject_semester_map
+        ADD COLUMN IF NOT EXISTS version
+        INTEGER DEFAULT 1
+    """)
+
+    cur.execute("""
+        ALTER TABLE subject_semester_map
+        ADD COLUMN IF NOT EXISTS sync_pending
+        INTEGER DEFAULT 0
+    """)
+
+    # ======================================================
+    # 3. SAFE DEFAULT REPAIR
+    # ======================================================
+
+    cur.execute("""
+        UPDATE subject_semester_map
+        SET section = 'ALL'
+        WHERE section IS NULL
+           OR TRIM(section) = ''
+    """)
+
+    cur.execute("""
+        UPDATE subject_semester_map
+        SET version = 1
+        WHERE version IS NULL
+    """)
+
+    cur.execute("""
+        UPDATE subject_semester_map
+        SET sync_pending = 0
+        WHERE sync_pending IS NULL
+    """)
+
+    cur.execute("""
+        UPDATE subject_semester_map
+        SET last_updated = CURRENT_TIMESTAMP
+        WHERE last_updated IS NULL
+    """)
+
+    # ======================================================
+    # 4. INDEX FOR CLOUD → LOCAL SYNC
+    # ======================================================
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_subject_semester_map_sync
+        ON subject_semester_map(last_updated)
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_subject_semester_map_lookup
+        ON subject_semester_map(
+            semester,
+            department,
+            section
+        )
+    """)
+
+    # ======================================================
+    # 5. BUILD MAPPINGS FROM EXISTING SUBJECT MASTER
+    #
+    # This preserves existing Cloud subject information.
+    #
+    # Only rows having BOTH department and semester are used.
+    # ======================================================
+
+    cur.execute("""
+        INSERT INTO subject_semester_map (
+            subject_id,
+            semester,
+            department,
+            section,
+            last_updated,
+            version,
+            sync_pending
+        )
+        SELECT DISTINCT
+            TRIM(s.subject_id),
+            TRIM(s.semester),
+            TRIM(s.department),
+            'ALL',
+            CURRENT_TIMESTAMP,
+            1,
+            0
+        FROM subjects s
+        WHERE s.subject_id IS NOT NULL
+          AND TRIM(s.subject_id) <> ''
+          AND s.semester IS NOT NULL
+          AND TRIM(s.semester) <> ''
+          AND s.department IS NOT NULL
+          AND TRIM(s.department) <> ''
+        ON CONFLICT (
+            subject_id,
+            semester,
+            department,
+            section
+        )
+        DO NOTHING
+    """)
+
+    print(
+        "📚 Existing subject → semester mappings preserved/created."
+    )
+
+    # ======================================================
+    # 6. BUILD MAPPINGS FROM FACULTY SUBJECT MAP
+    #
+    # faculty_subject_map already contains:
+    #     subject_id
+    #     semester
+    #     department
+    #     section
+    #
+    # Therefore it is another safe source for reconstructing
+    # the subject-semester mapping.
+    # ======================================================
+
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = 'faculty_subject_map'
+        )
+    """)
+
+    fsm_exists = cur.fetchone()[0]
+
+    if fsm_exists:
+
+        cur.execute("""
+            INSERT INTO subject_semester_map (
+                subject_id,
+                semester,
+                department,
+                section,
+                last_updated,
+                version,
+                sync_pending
+            )
+            SELECT DISTINCT
+                TRIM(f.subject_id),
+                TRIM(f.semester),
+                TRIM(f.department),
+                COALESCE(
+                    NULLIF(TRIM(f.section), ''),
+                    'ALL'
+                ),
+                CURRENT_TIMESTAMP,
+                1,
+                0
+            FROM faculty_subject_map f
+            WHERE f.subject_id IS NOT NULL
+              AND TRIM(f.subject_id) <> ''
+              AND f.semester IS NOT NULL
+              AND TRIM(f.semester) <> ''
+              AND f.department IS NOT NULL
+              AND TRIM(f.department) <> ''
+            ON CONFLICT (
+                subject_id,
+                semester,
+                department,
+                section
+            )
+            DO NOTHING
+        """)
+
+        print(
+            "📚 Faculty-subject mappings also synchronized into "
+            "subject_semester_map."
+        )
+
+    # ======================================================
+    # 7. PERMANENT ARCHITECTURE ASSISTANTSHIP
+    #    1st SEMESTER SUBJECT MASTER
+    #
+    # These are the verified subjects used by the application.
+    #
+    # Do NOT overwrite existing subject rows.
+    # ======================================================
+
+    architecture_subjects = [
+        (
+            "AS",
+            "Applied Sciences",
+            "TH"
+        ),
+        (
+            "AGD_P",
+            "Architectural Graphics & Drawing",
+            "LAB"
+        ),
+        (
+            "AW_P",
+            "Architecture Workshop-I",
+            "LAB"
+        ),
+        (
+            "BDVA_P",
+            "Basic Design & Visual Arts",
+            "LAB"
+        ),
+        (
+            "BOCAI_P",
+            "Basics of Computer & AI in Architecture",
+            "LAB"
+        ),
+        (
+            "BM",
+            "Building Materials",
+            "TH"
+        ),
+        (
+            "MATH1ARC",
+            "Mathematics",
+            "TH"
+        ),
+        (
+            "SY1ARC_P",
+            "Sports & Yoga",
+            "LAB"
+        ),
+        (
+            "SCA1ARC_P",
+            "Students Centered Activity",
+            "LAB"
+        ),
+    ]
+
+    # ======================================================
+    # 8. ENSURE ARCHITECTURE SUBJECT MASTER ROWS
+    #
+    # Current Cloud subjects uses:
+    #     PRIMARY KEY(subject_id, semester, department)
+    #
+    # Therefore we use the complete Cloud key.
+    # ======================================================
+
+    for subject_id, subject_name, subject_type in architecture_subjects:
+
+        cur.execute("""
+            INSERT INTO subjects (
+                subject_id,
+                subject_name,
+                department,
+                semester,
+                type
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            ON CONFLICT (
+                subject_id,
+                semester,
+                department
+            )
+            DO UPDATE SET
+                subject_name = EXCLUDED.subject_name,
+                type = EXCLUDED.type
+        """, (
+            subject_id,
+            subject_name,
+            "Architecture Assistantship",
+            "1st Semester",
+            subject_type
+        ))
+
+    print(
+        "🏛️ Architecture Assistantship subject master verified."
+    )
+
+    # ======================================================
+    # 9. ENSURE ARCHITECTURE MAPPINGS
+    #
+    # One ALL mapping guarantees that a freshly recreated
+    # local database can discover these subjects even when
+    # no section-specific row exists.
+    # ======================================================
+
+    for subject_id, subject_name, subject_type in architecture_subjects:
+
+        cur.execute("""
+            INSERT INTO subject_semester_map (
+                subject_id,
+                semester,
+                department,
+                section,
+                last_updated,
+                version,
+                sync_pending
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                'ALL',
+                CURRENT_TIMESTAMP,
+                1,
+                0
+            )
+            ON CONFLICT (
+                subject_id,
+                semester,
+                department,
+                section
+            )
+            DO UPDATE SET
+                last_updated = CURRENT_TIMESTAMP
+        """, (
+            subject_id,
+            "1st Semester",
+            "Architecture Assistantship"
+        ))
+
+    # ======================================================
+    # 10. FINAL VERIFICATION
+    # ======================================================
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM subject_semester_map
+        WHERE LOWER(TRIM(department))
+              = LOWER(TRIM(%s))
+          AND LOWER(TRIM(semester))
+              = LOWER(TRIM(%s))
+    """, (
+        "Architecture Assistantship",
+        "1st Semester"
+    ))
+
+    architecture_mapping_count = cur.fetchone()[0]
+
+    if architecture_mapping_count < len(architecture_subjects):
+
+        raise RuntimeError(
+            "Architecture subject mapping verification failed. "
+            f"Expected at least {len(architecture_subjects)}, "
+            f"found {architecture_mapping_count}."
+        )
+
+    print(
+        "✅ Architecture Assistantship mapping verified: "
+        f"{architecture_mapping_count} row(s)"
+    )
+
+    print(
+        "✅ subject_semester_map is permanently ready."
+    )
+
+    print("=" * 80)
 
 # ======================================================
 # STARTUP – CREATE TABLES (FINAL PRODUCTION SAFE VERSION)
@@ -696,6 +1140,12 @@ def startup():
             )
         """)
 
+        # ======================================================
+        # SUBJECT → SEMESTER → DEPARTMENT MAP
+        # PERMANENT CLOUD AUTHORITATIVE SOURCE
+        # ======================================================
+
+        ensure_subject_semester_map(conn, cur)
         # ======================================================
         # ROOMS
         # ======================================================
