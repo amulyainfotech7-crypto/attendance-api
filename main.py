@@ -428,6 +428,7 @@ SYNC_TABLES = {
     "attendance_daily",
     "timetable_slots",
     "subjects",
+    "subject_semester_map",
     "semester_dates",
     "holidays",
 
@@ -558,26 +559,27 @@ def ensure_subject_semester_map(conn, cur):
     """
     Permanently maintains subject_semester_map.
 
-    NO subject, department, semester or section is hard-coded.
+    The mapping is completely data-driven.  No subject, department,
+    semester, section or other application value is hard-coded here.
 
-    Mapping information is reconstructed dynamically from
-    existing Cloud tables.
+    Logical mapping identity:
+        subject_id + semester + department + section
 
-    Logical identity:
-
-        subject_id
-        semester
-        department
-        section
+    The function is intentionally migration-safe:
+      * preserves existing mapping data;
+      * removes only rows that are true logical duplicates;
+      * safely migrates an older 3-column uniqueness definition;
+      * keeps a usable PostgreSQL primary key for generic sync;
+      * rebuilds mappings from the authoritative tables already in Cloud.
     """
 
     print("\n" + "=" * 80)
     print("📚 CHECKING SUBJECT_SEMESTER_MAP")
     print("=" * 80)
 
-    # ======================================================
-    # 1. CHECK WHETHER TABLE EXISTS
-    # ======================================================
+    # ============================================================
+    # 1. CREATE TABLE WHEN ABSENT
+    # ============================================================
 
     cur.execute("""
         SELECT EXISTS (
@@ -590,40 +592,27 @@ def ensure_subject_semester_map(conn, cur):
 
     table_exists = cur.fetchone()[0]
 
-    # ======================================================
-    # 2. CREATE TABLE ONLY IF IT DOES NOT EXIST
-    # ======================================================
-
     if not table_exists:
-
-        print(
-            "📚 subject_semester_map does not exist."
-        )
+        print("📚 subject_semester_map does not exist. Creating it.")
 
         cur.execute("""
             CREATE TABLE subject_semester_map (
                 id BIGSERIAL PRIMARY KEY,
-
                 subject_id TEXT NOT NULL,
                 semester TEXT NOT NULL,
                 department TEXT NOT NULL,
                 section TEXT NOT NULL DEFAULT 'ALL',
-
-                last_updated TIMESTAMP
-                    DEFAULT CURRENT_TIMESTAMP,
-
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 version INTEGER DEFAULT 1,
                 sync_pending INTEGER DEFAULT 0
             )
         """)
 
-        print(
-            "✅ subject_semester_map created."
-        )
+        print("✅ subject_semester_map created.")
 
-    # ======================================================
-    # 3. ENSURE REQUIRED COLUMNS
-    # ======================================================
+    # ============================================================
+    # 2. ENSURE REQUIRED COLUMNS
+    # ============================================================
 
     required_columns = {
         "subject_id": "TEXT",
@@ -636,7 +625,6 @@ def ensure_subject_semester_map(conn, cur):
     }
 
     for column_name, column_definition in required_columns.items():
-
         cur.execute("""
             SELECT EXISTS (
                 SELECT 1
@@ -647,27 +635,19 @@ def ensure_subject_semester_map(conn, cur):
             )
         """, (column_name,))
 
-        exists = cur.fetchone()[0]
-
-        if not exists:
-
-            print(
-                f"🔧 Adding missing column: {column_name}"
-            )
+        if not cur.fetchone()[0]:
+            print(f"🔧 Adding missing column: {column_name}")
 
             cur.execute(
                 f"""
-                ALTER TABLE subject_semester_map
-                ADD COLUMN "{column_name}"
-                {column_definition}
+                    ALTER TABLE subject_semester_map
+                    ADD COLUMN "{column_name}" {column_definition}
                 """
             )
 
-    # ======================================================
-    # 4. ENSURE ID COLUMN
-    #
-    # Needed for compatibility with existing Cloud rows.
-    # ======================================================
+    # ============================================================
+    # 3. ENSURE SURROGATE ID
+    # ============================================================
 
     cur.execute("""
         SELECT EXISTS (
@@ -679,115 +659,109 @@ def ensure_subject_semester_map(conn, cur):
         )
     """)
 
-    id_exists = cur.fetchone()[0]
-
-    if not id_exists:
-
-        print(
-            "🔧 Adding subject_semester_map.id"
-        )
+    if not cur.fetchone()[0]:
+        print("🔧 Adding subject_semester_map.id")
 
         cur.execute("""
             ALTER TABLE subject_semester_map
-            ADD COLUMN id BIGSERIAL
+            ADD COLUMN id BIGINT
         """)
 
-    # ======================================================
-    # 5. NORMALIZE SECTION
+    # ============================================================
+    # 4. IDENTIFY AND REMOVE OBSOLETE 3-COLUMN CONSTRAINTS
     #
-    # FIRST remove the obsolete uniqueness constraint.
-    # Otherwise two departments can collide when NULL/blank
-    # sections become ALL.
-    # ======================================================
+    # Older deployments used:
+    #     subject_id + semester + section
+    #
+    # That identity is insufficient because the same subject/semester
+    # can legitimately exist in more than one department.
+    #
+    # We inspect actual PostgreSQL constraint columns instead of
+    # guessing from constraint names.
+    # ============================================================
+
+    old_identity = {
+        "subject_id",
+        "semester",
+        "section",
+    }
 
     cur.execute("""
         SELECT
             con.conname,
-            pg_get_constraintdef(con.oid)
+            con.contype,
+            ARRAY(
+                SELECT a.attname
+                FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+                JOIN pg_attribute a
+                  ON a.attrelid = con.conrelid
+                 AND a.attnum = k.attnum
+                ORDER BY k.ord
+            ) AS columns
         FROM pg_constraint con
         JOIN pg_class rel
-            ON rel.oid = con.conrelid
+          ON rel.oid = con.conrelid
         JOIN pg_namespace nsp
-            ON nsp.oid = rel.relnamespace
+          ON nsp.oid = rel.relnamespace
         WHERE nsp.nspname = 'public'
           AND rel.relname = 'subject_semester_map'
-          AND con.contype = 'u'
+          AND con.contype IN ('p', 'u')
     """)
 
-    unique_constraints = cur.fetchall()
+    constraints = cur.fetchall()
 
-    for constraint_name, constraint_definition in unique_constraints:
+    for constraint_name, constraint_type, constraint_columns in constraints:
+        actual_columns = {
+            str(c).strip()
+            for c in (constraint_columns or [])
+            if c is not None
+        }
 
-        definition = (
-            str(constraint_definition or "")
-            .lower()
-            .replace(" ", "")
-        )
-
-        # Detect old uniqueness:
-        #
-        # (subject_id, semester, section)
-        #
-        # Do not remove a constraint that already includes
-        # department.
-
-        if (
-            "subject_id" in definition
-            and "semester" in definition
-            and "section" in definition
-            and "department" not in definition
-        ):
-
+        # Drop only the obsolete 3-column identity.
+        if actual_columns == old_identity:
             print(
-                "🔧 Removing obsolete mapping constraint:",
-                constraint_name
+                "🔧 Removing obsolete "
+                f"{'PRIMARY KEY' if constraint_type == 'p' else 'UNIQUE'} "
+                f"constraint: {constraint_name}"
             )
 
             cur.execute(
-                f'''
-                ALTER TABLE subject_semester_map
-                DROP CONSTRAINT IF EXISTS "{constraint_name}"
-                '''
+                f"""
+                    ALTER TABLE subject_semester_map
+                    DROP CONSTRAINT IF EXISTS "{constraint_name}"
+                """
             )
 
-    # ======================================================
-    # 6. CHECK UNIQUE INDEXES TOO
-    # ======================================================
+    # ============================================================
+    # 5. REMOVE OBSOLETE 3-COLUMN UNIQUE INDEXES
+    #
+    # Constraint-backed indexes disappear automatically when the
+    # constraint is dropped.  This second check handles standalone
+    # indexes created by older versions.
+    # ============================================================
 
     cur.execute("""
-        SELECT
-            indexname,
-            indexdef
+        SELECT indexname, indexdef
         FROM pg_indexes
         WHERE schemaname = 'public'
           AND tablename = 'subject_semester_map'
     """)
 
-    indexes = cur.fetchall()
-
-    for index_name, index_definition in indexes:
-
+    for index_name, index_definition in cur.fetchall():
         definition = (
             str(index_definition or "")
             .lower()
             .replace(" ", "")
+            .replace('"', "")
         )
 
-        # Ignore indexes that contain department.
-        #
-        # Remove only old unique indexes whose logical
-        # identity is:
-        #
-        # subject_id + semester + section
-
         if (
-            "uniqueindex" in definition
+            "createuniqueindex" in definition
             and "subject_id" in definition
             and "semester" in definition
             and "section" in definition
             and "department" not in definition
         ):
-
             print(
                 "🔧 Removing obsolete mapping index:",
                 index_name
@@ -797,9 +771,78 @@ def ensure_subject_semester_map(conn, cur):
                 f'DROP INDEX IF EXISTS "{index_name}"'
             )
 
-    # ======================================================
-    # 7. NORMALIZE NULL / EMPTY VALUES
-    # ======================================================
+    # ============================================================
+    # 6. NORMALIZE LOGICAL DUPLICATES BEFORE NORMALIZING SECTION
+    #
+    # This is the important fix for the current deployment failure.
+    #
+    # Example:
+    #   same subject/semester/department + NULL section
+    #   same subject/semester/department + ALL section
+    #
+    # These become the same logical row after normalization.
+    # Delete only the older duplicate; different departments are kept.
+    # ============================================================
+
+    cur.execute("""
+        DELETE FROM subject_semester_map a
+        USING subject_semester_map b
+        WHERE a.ctid < b.ctid
+          AND UPPER(TRIM(COALESCE(a.subject_id, '')))
+              = UPPER(TRIM(COALESCE(b.subject_id, '')))
+          AND LOWER(TRIM(COALESCE(a.semester, '')))
+              = LOWER(TRIM(COALESCE(b.semester, '')))
+          AND LOWER(TRIM(COALESCE(a.department, '')))
+              = LOWER(TRIM(COALESCE(b.department, '')))
+          AND LOWER(
+                TRIM(
+                    COALESCE(
+                        NULLIF(TRIM(a.section), ''),
+                        'ALL'
+                    )
+                )
+              )
+              =
+              LOWER(
+                TRIM(
+                    COALESCE(
+                        NULLIF(TRIM(b.section), ''),
+                        'ALL'
+                    )
+                )
+              )
+    """)
+
+    print(
+        "🧹 Logical duplicates consolidated before "
+        "section normalization:",
+        cur.rowcount
+    )
+
+    # ============================================================
+    # 7. NORMALIZE VALUES
+    # ============================================================
+
+    cur.execute("""
+        UPDATE subject_semester_map
+        SET subject_id = TRIM(subject_id)
+        WHERE subject_id IS NOT NULL
+          AND subject_id <> TRIM(subject_id)
+    """)
+
+    cur.execute("""
+        UPDATE subject_semester_map
+        SET semester = TRIM(semester)
+        WHERE semester IS NOT NULL
+          AND semester <> TRIM(semester)
+    """)
+
+    cur.execute("""
+        UPDATE subject_semester_map
+        SET department = TRIM(department)
+        WHERE department IS NOT NULL
+          AND department <> TRIM(department)
+    """)
 
     cur.execute("""
         UPDATE subject_semester_map
@@ -826,60 +869,273 @@ def ensure_subject_semester_map(conn, cur):
         WHERE last_updated IS NULL
     """)
 
-    # ======================================================
-    # 8. REMOVE EXACT DUPLICATES
+    # ============================================================
+    # 8. FINAL LOGICAL DEDUPLICATION
     #
-    # Only identical logical mappings are removed.
-    #
-    # Different departments are NEVER considered duplicates.
-    # ======================================================
+    # The first pass protects the NULL/blank -> ALL transition.
+    # This pass also protects against rows that differed only by
+    # whitespace/case in subject/semester/department.
+    # ============================================================
 
     cur.execute("""
         DELETE FROM subject_semester_map a
         USING subject_semester_map b
-        WHERE a.id < b.id
-
-          AND UPPER(
-                TRIM(COALESCE(a.subject_id, ''))
-              )
-              =
-              UPPER(
-                TRIM(COALESCE(b.subject_id, ''))
-              )
-
-          AND LOWER(
-                TRIM(COALESCE(a.semester, ''))
-              )
-              =
-              LOWER(
-                TRIM(COALESCE(b.semester, ''))
-              )
-
-          AND LOWER(
-                TRIM(COALESCE(a.department, ''))
-              )
-              =
-              LOWER(
-                TRIM(COALESCE(b.department, ''))
-              )
-
-          AND LOWER(
-                TRIM(COALESCE(a.section, 'ALL'))
-              )
-              =
-              LOWER(
-                TRIM(COALESCE(b.section, 'ALL'))
-              )
+        WHERE a.ctid < b.ctid
+          AND UPPER(TRIM(COALESCE(a.subject_id, '')))
+              = UPPER(TRIM(COALESCE(b.subject_id, '')))
+          AND LOWER(TRIM(COALESCE(a.semester, '')))
+              = LOWER(TRIM(COALESCE(b.semester, '')))
+          AND LOWER(TRIM(COALESCE(a.department, '')))
+              = LOWER(TRIM(COALESCE(b.department, '')))
+          AND LOWER(TRIM(COALESCE(a.section, 'ALL')))
+              = LOWER(TRIM(COALESCE(b.section, 'ALL')))
     """)
 
     print(
-        "🧹 Exact duplicate mappings removed:",
+        "🧹 Final logical duplicates removed:",
         cur.rowcount
     )
 
-    # ======================================================
-    # 9. CREATE CORRECT LOGICAL UNIQUE INDEX
-    # ======================================================
+    # ============================================================
+    # 9. REPAIR SURROGATE ID
+    #
+    # Generic sync requires a stable PostgreSQL primary key when the
+    # table is configured that way.  Existing IDs are preserved.
+    # Only NULL/duplicate IDs receive new generated values.
+    # ============================================================
+
+    cur.execute("""
+        CREATE SEQUENCE IF NOT EXISTS
+        subject_semester_map_id_seq
+    """)
+
+    cur.execute("""
+        SELECT data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'subject_semester_map'
+          AND column_name = 'id'
+    """)
+
+    id_type_row = cur.fetchone()
+
+    if not id_type_row:
+        raise RuntimeError(
+            "subject_semester_map.id column could not be verified."
+        )
+
+    id_data_type = str(id_type_row[0]).lower()
+
+    if id_data_type not in (
+        "smallint",
+        "integer",
+        "bigint",
+    ):
+        raise RuntimeError(
+            "subject_semester_map.id must be an integer column; "
+            f"found {id_data_type!r}."
+        )
+
+    cur.execute("""
+        SELECT COALESCE(MAX(id), 0)
+        FROM subject_semester_map
+    """)
+
+    max_id_row = cur.fetchone()
+    max_id = (
+        int(max_id_row[0])
+        if max_id_row and max_id_row[0] is not None
+        else 0
+    )
+
+    cur.execute("""
+        SELECT setval(
+            'subject_semester_map_id_seq',
+            %s,
+            false
+        )
+    """, (max_id + 1,))
+
+    # Repair NULL IDs.
+    cur.execute("""
+        UPDATE subject_semester_map
+        SET id = nextval('subject_semester_map_id_seq')
+        WHERE id IS NULL
+    """)
+
+    repaired_null_ids = cur.rowcount
+
+    # Reposition the sequence after NULL-ID repair.
+    cur.execute("""
+        SELECT COALESCE(MAX(id), 0)
+        FROM subject_semester_map
+    """)
+
+    max_id = int(cur.fetchone()[0] or 0)
+
+    cur.execute("""
+        SELECT setval(
+            'subject_semester_map_id_seq',
+            %s,
+            false
+        )
+    """, (max_id + 1,))
+
+    # Repair duplicate IDs without deleting mapping data.
+    cur.execute("""
+        WITH duplicate_rows AS (
+            SELECT
+                ctid,
+                id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY id
+                    ORDER BY ctid
+                ) AS rn
+            FROM subject_semester_map
+            WHERE id IS NOT NULL
+        ),
+        rows_to_repair AS (
+            SELECT ctid
+            FROM duplicate_rows
+            WHERE rn > 1
+        )
+        UPDATE subject_semester_map AS s
+        SET id = nextval('subject_semester_map_id_seq')
+        FROM rows_to_repair AS r
+        WHERE s.ctid = r.ctid
+    """)
+
+    repaired_duplicate_ids = cur.rowcount
+
+    print(
+        "🔧 subject_semester_map NULL IDs repaired:",
+        repaired_null_ids
+    )
+    print(
+        "🔧 subject_semester_map duplicate IDs repaired:",
+        repaired_duplicate_ids
+    )
+
+    # Final sequence position.
+    cur.execute("""
+        SELECT COALESCE(MAX(id), 0)
+        FROM subject_semester_map
+    """)
+
+    max_id = int(cur.fetchone()[0] or 0)
+
+    cur.execute("""
+        SELECT setval(
+            'subject_semester_map_id_seq',
+            %s,
+            false
+        )
+    """, (max_id + 1,))
+
+    cur.execute("""
+        ALTER TABLE subject_semester_map
+        ALTER COLUMN id
+        SET DEFAULT nextval('subject_semester_map_id_seq')
+    """)
+
+    cur.execute("""
+        ALTER SEQUENCE subject_semester_map_id_seq
+        OWNED BY subject_semester_map.id
+    """)
+
+    # ============================================================
+    # 10. ENSURE A PRIMARY KEY EXISTS
+    #
+    # Prefer id when the existing table does not already have a
+    # valid logical 4-column primary key.
+    # ============================================================
+
+    cur.execute("""
+        SELECT
+            con.conname,
+            ARRAY(
+                SELECT a.attname
+                FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+                JOIN pg_attribute a
+                  ON a.attrelid = con.conrelid
+                 AND a.attnum = k.attnum
+                ORDER BY k.ord
+            ) AS columns
+        FROM pg_constraint con
+        JOIN pg_class rel
+          ON rel.oid = con.conrelid
+        JOIN pg_namespace nsp
+          ON nsp.oid = rel.relnamespace
+        WHERE nsp.nspname = 'public'
+          AND rel.relname = 'subject_semester_map'
+          AND con.contype = 'p'
+    """)
+
+    primary_key_rows = cur.fetchall()
+
+    if not primary_key_rows:
+        cur.execute("""
+            ALTER TABLE subject_semester_map
+            ALTER COLUMN id SET NOT NULL
+        """)
+
+        cur.execute("""
+            ALTER TABLE subject_semester_map
+            ADD CONSTRAINT subject_semester_map_pkey
+            PRIMARY KEY (id)
+        """)
+
+        print("🔑 Created subject_semester_map PRIMARY KEY (id).")
+
+    else:
+        pk_name, pk_columns = primary_key_rows[0]
+        pk_columns = [
+            str(c).strip()
+            for c in (pk_columns or [])
+        ]
+
+        if pk_columns != ["id"]:
+            # A 4-column logical primary key is valid for sync, so
+            # preserve it.  An obsolete/other primary key is replaced
+            # with the stable surrogate id.
+            logical_columns = [
+                "subject_id",
+                "semester",
+                "department",
+                "section",
+            ]
+
+            if pk_columns != logical_columns:
+                print(
+                    "🔧 Replacing non-standard "
+                    "subject_semester_map PRIMARY KEY:",
+                    pk_name,
+                    pk_columns
+                )
+
+                cur.execute(
+                    f"""
+                        ALTER TABLE subject_semester_map
+                        DROP CONSTRAINT IF EXISTS "{pk_name}"
+                    """
+                )
+
+                cur.execute("""
+                    ALTER TABLE subject_semester_map
+                    ALTER COLUMN id SET NOT NULL
+                """)
+
+                cur.execute("""
+                    ALTER TABLE subject_semester_map
+                    ADD CONSTRAINT subject_semester_map_pkey
+                    PRIMARY KEY (id)
+                """)
+
+    # ============================================================
+    # 11. ENSURE THE CORRECT LOGICAL UNIQUE INDEX
+    #
+    # This is separate from the surrogate primary key.
+    # ============================================================
 
     cur.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS
@@ -891,18 +1147,6 @@ def ensure_subject_semester_map(conn, cur):
             section
         )
     """)
-
-    print(
-        "✅ Logical identity is now:"
-    )
-
-    print(
-        "   subject_id + semester + department + section"
-    )
-
-    # ======================================================
-    # 10. INDEX FOR INCREMENTAL CLOUD SYNC
-    # ======================================================
 
     cur.execute("""
         CREATE INDEX IF NOT EXISTS
@@ -921,14 +1165,16 @@ def ensure_subject_semester_map(conn, cur):
         )
     """)
 
-    # ======================================================
-    # 11. DYNAMICALLY REBUILD FROM SUBJECTS
+    print(
+        "✅ Mapping identity:"
+        " subject_id + semester + department + section"
+    )
+
+    # ============================================================
+    # 12. DYNAMICALLY REBUILD FROM SUBJECT MASTER
     #
-    # NO HARD-CODED SUBJECTS.
-    #
-    # Only rows where Cloud subjects already contains
-    # department + semester are converted into mappings.
-    # ======================================================
+    # No application values are hard-coded.
+    # ============================================================
 
     cur.execute("""
         SELECT EXISTS (
@@ -939,10 +1185,7 @@ def ensure_subject_semester_map(conn, cur):
         )
     """)
 
-    subjects_exists = cur.fetchone()[0]
-
-    if subjects_exists:
-
+    if cur.fetchone()[0]:
         cur.execute("""
             INSERT INTO subject_semester_map (
                 subject_id,
@@ -964,13 +1207,10 @@ def ensure_subject_semester_map(conn, cur):
             FROM subjects s
             WHERE s.subject_id IS NOT NULL
               AND TRIM(s.subject_id) <> ''
-
               AND s.semester IS NOT NULL
               AND TRIM(s.semester) <> ''
-
               AND s.department IS NOT NULL
               AND TRIM(s.department) <> ''
-
             ON CONFLICT (
                 subject_id,
                 semester,
@@ -984,13 +1224,9 @@ def ensure_subject_semester_map(conn, cur):
             "📚 Subject-master mappings synchronized dynamically."
         )
 
-    # ======================================================
-    # 12. DYNAMICALLY REBUILD FROM FACULTY SUBJECT MAP
-    #
-    # This captures mappings that may exist in faculty
-    # assignments even if subjects.department/semester
-    # is NULL.
-    # ======================================================
+    # ============================================================
+    # 13. DYNAMICALLY REBUILD FROM FACULTY SUBJECT MAP
+    # ============================================================
 
     cur.execute("""
         SELECT EXISTS (
@@ -1001,11 +1237,7 @@ def ensure_subject_semester_map(conn, cur):
         )
     """)
 
-    faculty_map_exists = cur.fetchone()[0]
-
-    if faculty_map_exists:
-
-        # Check the actual columns before using them.
+    if cur.fetchone()[0]:
         cur.execute("""
             SELECT column_name
             FROM information_schema.columns
@@ -1026,7 +1258,6 @@ def ensure_subject_semester_map(conn, cur):
         }
 
         if required.issubset(faculty_columns):
-
             cur.execute("""
                 INSERT INTO subject_semester_map (
                     subject_id,
@@ -1051,13 +1282,10 @@ def ensure_subject_semester_map(conn, cur):
                 FROM faculty_subject_map f
                 WHERE f.subject_id IS NOT NULL
                   AND TRIM(f.subject_id) <> ''
-
                   AND f.semester IS NOT NULL
                   AND TRIM(f.semester) <> ''
-
                   AND f.department IS NOT NULL
                   AND TRIM(f.department) <> ''
-
                 ON CONFLICT (
                     subject_id,
                     semester,
@@ -1071,9 +1299,9 @@ def ensure_subject_semester_map(conn, cur):
                 "📚 Faculty mappings synchronized dynamically."
             )
 
-    # ======================================================
-    # 13. FINAL VERIFICATION
-    # ======================================================
+    # ============================================================
+    # 14. FINAL VERIFICATION
+    # ============================================================
 
     cur.execute("""
         SELECT COUNT(*)
@@ -1084,6 +1312,8 @@ def ensure_subject_semester_map(conn, cur):
           AND TRIM(semester) <> ''
           AND department IS NOT NULL
           AND TRIM(department) <> ''
+          AND section IS NOT NULL
+          AND TRIM(section) <> ''
     """)
 
     valid_mapping_count = cur.fetchone()[0]
@@ -1095,23 +1325,235 @@ def ensure_subject_semester_map(conn, cur):
 
     total_mapping_count = cur.fetchone()[0]
 
-    print(
-        "📊 Total mapping rows:",
-        total_mapping_count
-    )
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM subject_semester_map
+        WHERE id IS NULL
+    """)
 
-    print(
-        "📊 Valid mapping rows:",
-        valid_mapping_count
-    )
+    null_id_count = cur.fetchone()[0]
 
-    print(
-        "✅ subject_semester_map is ready."
-    )
+    if null_id_count:
+        raise RuntimeError(
+            "subject_semester_map still contains "
+            f"{null_id_count} NULL id value(s)."
+        )
 
+    print("📊 Total mapping rows:", total_mapping_count)
+    print("📊 Valid mapping rows:", valid_mapping_count)
+    print("✅ subject_semester_map is ready.")
     print("=" * 80)
 
-    
+
+def ensure_subjects_for_timetable_records(cur, records):
+    """
+    Ensures every subject referenced by incoming timetable records
+    already exists in the Cloud subject master BEFORE timetable rows
+    are inserted.
+
+    This is fully dynamic:
+      * subject IDs come from the incoming records;
+      * name/type/department/semester come from the incoming data;
+      * no subject or department is hard-coded.
+
+    This prevents a timetable foreign-key failure when a fresh or
+    restored Cloud database receives timetable data before the
+    corresponding subject-master row.
+    """
+
+    if not records:
+        return 0
+
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = 'subjects'
+        )
+    """)
+
+    if not cur.fetchone()[0]:
+        raise RuntimeError(
+            "Cloud subjects table does not exist."
+        )
+
+    inserted = 0
+    seen = set()
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+
+        subject_id = str(
+            record.get("subject_id")
+            or record.get("subject")
+            or ""
+        ).strip()
+
+        if not subject_id:
+            continue
+
+        subject_key = subject_id.upper()
+
+        if subject_key in seen:
+            continue
+
+        seen.add(subject_key)
+
+        subject_name = str(
+            record.get("subject_name")
+            or subject_id
+        ).strip()
+
+        department = str(
+            record.get("department")
+            or ""
+        ).strip()
+
+        semester = str(
+            record.get("semester")
+            or ""
+        ).strip()
+
+        subject_type = str(
+            record.get("type")
+            or ""
+        ).strip()
+
+        # First check whether the subject already exists.
+        cur.execute("""
+            SELECT 1
+            FROM subjects
+            WHERE LOWER(TRIM(subject_id))
+                  = LOWER(TRIM(%s))
+            LIMIT 1
+        """, (subject_id,))
+
+        if cur.fetchone():
+            continue
+
+        if not department or not semester:
+            print(
+                "⚠ Cannot create missing subject-master row "
+                "without department/semester:",
+                subject_id
+            )
+            continue
+
+        cur.execute("""
+            INSERT INTO subjects (
+                subject_id,
+                subject_name,
+                department,
+                semester,
+                type
+            )
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+        """, (
+            subject_id,
+            subject_name,
+            department,
+            semester,
+            subject_type or None,
+        ))
+
+        inserted += cur.rowcount
+
+    if inserted:
+        print(
+            "📚 Missing timetable subject-master rows created:",
+            inserted
+        )
+
+
+    # Also create the corresponding subject-semester-department
+    # mapping from the same timetable payload.  This keeps the
+    # mapping available immediately, including after a fresh restore.
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = 'subject_semester_map'
+        )
+    """)
+
+    if cur.fetchone()[0]:
+        mapping_rows = []
+
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+
+            subject_id = str(
+                record.get("subject_id")
+                or record.get("subject")
+                or ""
+            ).strip()
+
+            semester = str(
+                record.get("semester")
+                or ""
+            ).strip()
+
+            department = str(
+                record.get("department")
+                or ""
+            ).strip()
+
+            section = str(
+                record.get("section")
+                or "ALL"
+            ).strip()
+
+            if not section:
+                section = "ALL"
+
+            if subject_id and semester and department:
+                mapping_rows.append({
+                    "subject_id": subject_id,
+                    "semester": semester,
+                    "department": department,
+                    "section": section,
+                })
+
+        if mapping_rows:
+            cur.executemany("""
+                INSERT INTO subject_semester_map (
+                    subject_id,
+                    semester,
+                    department,
+                    section,
+                    last_updated,
+                    version,
+                    sync_pending
+                )
+                VALUES (
+                    %(subject_id)s,
+                    %(semester)s,
+                    %(department)s,
+                    %(section)s,
+                    CURRENT_TIMESTAMP,
+                    1,
+                    0
+                )
+                ON CONFLICT (
+                    subject_id,
+                    semester,
+                    department,
+                    section
+                )
+                DO NOTHING
+            """, mapping_rows)
+
+            print(
+                "📚 Timetable subject mappings ensured:",
+                cur.rowcount
+            )
+
+    return inserted
 # ======================================================
 # STARTUP – CREATE TABLES (FINAL PRODUCTION SAFE VERSION)
 # ======================================================
@@ -1263,7 +1705,6 @@ def startup():
         # PERMANENT CLOUD AUTHORITATIVE SOURCE
         # ======================================================
 
-        ensure_subject_semester_map(conn, cur)
         # ======================================================
         # ROOMS
         # ======================================================
@@ -1704,7 +2145,12 @@ def startup():
             "✅ faculty_subject_map PostgreSQL ID is ready"
         )
 
+        # ======================================================
+        # SUBJECT → SEMESTER → DEPARTMENT MAP
+        # RUN AFTER FACULTY SUBJECT MAP EXISTS
+        # ======================================================
 
+        ensure_subject_semester_map(conn, cur)
 
         # ======================================================
         # TIMETABLE
@@ -3933,6 +4379,16 @@ def sync_faculty_from_cloud(since: Optional[str] = None):
 
 @app.post("/sync/timetable")
 def sync_timetable(records: list = Body(...)):
+    """
+    Local → Cloud timetable synchronization.
+
+    Subject-master rows are ensured BEFORE timetable rows are written,
+    so timetable_slots.subject_id can safely satisfy its PostgreSQL
+    foreign-key relationship with subjects.subject_id.
+
+    All subject information is taken dynamically from the incoming
+    timetable records.  No application subject is hard-coded.
+    """
 
     if not records:
         return {"status": "no_data"}
@@ -3961,10 +4417,6 @@ def sync_timetable(records: list = Body(...)):
             )
         """)
 
-        # ------------------------------------------------------
-        # SAFE FACULTY USERNAME COLUMN MIGRATION
-        # ------------------------------------------------------
-
         cur.execute("""
             ALTER TABLE faculty
             ADD COLUMN IF NOT EXISTS username TEXT
@@ -3972,13 +4424,15 @@ def sync_timetable(records: list = Body(...)):
 
         print("✅ Faculty username column verified")
 
-        # --------------------------------------------------
-        # Normalize records
-        # --------------------------------------------------
+        # ======================================================
+        # NORMALIZE RECORDS
+        # ======================================================
 
         normalized = []
 
         for r in records:
+            if not isinstance(r, dict):
+                continue
 
             normalized.append({
                 "department": r.get("department"),
@@ -3991,26 +4445,73 @@ def sync_timetable(records: list = Body(...)):
                 "subject_id": r.get("subject_id"),
                 "faculty_id": r.get("faculty_id"),
                 "room": r.get("room"),
-                "last_updated": r.get("last_updated") or datetime.utcnow(),
-                "version": r.get("version",1)
+                "last_updated": (
+                    r.get("last_updated")
+                    or datetime.utcnow()
+                ),
+                "version": r.get("version", 1),
             })
 
-        # --------------------------------------------------
+        if not normalized:
+            return {
+                "status": "no_data",
+                "rows_processed": 0
+            }
+
+        # ======================================================
+        # 🔥 CRITICAL FK FIX
+        #
+        # Ensure all referenced subjects exist BEFORE inserting
+        # timetable_slots.
+        # ======================================================
+
+        ensure_subjects_for_timetable_records(
+            cur,
+            normalized
+        )
+
+        # ======================================================
         # UPSERT TIMETABLE
-        # --------------------------------------------------
+        # ======================================================
 
         query = """
         INSERT INTO timetable_slots
-        (department,semester,section,day,period_no,
-         period_len,type,subject_id,faculty_id,room,
-         last_updated,version)
-
+        (
+            department,
+            semester,
+            section,
+            day,
+            period_no,
+            period_len,
+            type,
+            subject_id,
+            faculty_id,
+            room,
+            last_updated,
+            version
+        )
         VALUES
-        (%(department)s,%(semester)s,%(section)s,%(day)s,%(period_no)s,
-         %(period_len)s,%(type)s,%(subject_id)s,%(faculty_id)s,%(room)s,
-         %(last_updated)s,%(version)s)
-
-        ON CONFLICT (department,semester,section,day,period_no)
+        (
+            %(department)s,
+            %(semester)s,
+            %(section)s,
+            %(day)s,
+            %(period_no)s,
+            %(period_len)s,
+            %(type)s,
+            %(subject_id)s,
+            %(faculty_id)s,
+            %(room)s,
+            %(last_updated)s,
+            %(version)s
+        )
+        ON CONFLICT (
+            department,
+            semester,
+            section,
+            day,
+            period_no
+        )
         DO UPDATE SET
             period_len = EXCLUDED.period_len,
             type = EXCLUDED.type,
@@ -4022,36 +4523,29 @@ def sync_timetable(records: list = Body(...)):
         WHERE timetable_slots.version <= EXCLUDED.version;
         """
 
-        execute_batch(cur, query, normalized)
+        execute_batch(
+            cur,
+            query,
+            normalized
+        )
 
+        # One atomic transaction:
+        # subject master + mapping + timetable.
         conn.commit()
 
-        # --------------------------------------------------
-        # 🔥 AUTO CREATE SUBJECTS FROM TIMETABLE
-        # --------------------------------------------------
+        print(
+            "✅ Timetable + subject master synchronization committed."
+        )
 
-        cur.execute("""
-        INSERT INTO subjects (subject_id,subject_name,department,semester,type)
-        SELECT DISTINCT
-            subject_id,
-            subject_id,
-            department,
-            semester,
-            type
-        FROM timetable_slots
-        WHERE subject_id IS NOT NULL
-        ON CONFLICT DO NOTHING
-        """)
-
-        conn.commit()
-
-        # --------------------------------------------------
-        # Broadcast realtime update
-        # --------------------------------------------------
+        # ======================================================
+        # BROADCAST REALTIME UPDATE
+        # ======================================================
 
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(broadcast_event("timetable_slots"))
+            loop.create_task(
+                broadcast_event("timetable_slots")
+            )
         except RuntimeError:
             pass
 
@@ -4059,6 +4553,11 @@ def sync_timetable(records: list = Body(...)):
 
         conn.rollback()
         release_db(conn)
+
+        print(
+            "❌ TIMETABLE CLOUD SYNC FAILED:",
+            e
+        )
 
         raise HTTPException(
             status_code=500,
@@ -4068,10 +4567,9 @@ def sync_timetable(records: list = Body(...)):
     release_db(conn)
 
     return {
-        "status":"success",
-        "rows_processed":len(normalized)
+        "status": "success",
+        "rows_processed": len(normalized)
     }
-
 # ======================================================
 # 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL SAFE)
 # ======================================================
@@ -7794,6 +8292,21 @@ def universal_sync_upload(
             )
 
         print("-" * 80)
+
+        # ==================================================
+        # TIMETABLE FOREIGN-KEY PROTECTION
+        # ==================================================
+        #
+        # Generic sync can also receive timetable_slots.  Ensure the
+        # referenced subject-master rows exist before PostgreSQL checks
+        # the timetable foreign key.
+        # ==================================================
+
+        if table_name == "timetable_slots":
+            ensure_subjects_for_timetable_records(
+                cur,
+                records
+            )
 
         # ==================================================
         # EXECUTE
