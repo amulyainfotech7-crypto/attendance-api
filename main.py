@@ -3385,6 +3385,7 @@ def _verify_practical_faculty_assignment(
         )
 
 
+
 def _practical_attendance_map(
     cur,
     semester: str,
@@ -3394,8 +3395,14 @@ def _practical_attendance_map(
     """
     Automatic N-2026 practical attendance marks.
 
-    Source of truth remains master_attendance.
-    The calculation is the same percentage-to-maximum scaling
+    Source of truth is attendance_daily.
+
+    Flutter attendance is saved directly into attendance_daily.
+    Therefore practical attendance must be calculated from the same
+    table so that marks saved from Flutter are immediately reflected
+    when /practical-marks is fetched.
+
+    The calculation remains the same percentage-to-maximum scaling
     used by the existing desktop practical IA logic.
     """
 
@@ -3405,9 +3412,14 @@ def _practical_attendance_map(
     cur.execute("""
         SELECT
             sbrn,
-            SUM(attended) AS attended,
-            SUM(delivered) AS delivered
-        FROM master_attendance
+            COUNT(*) AS delivered,
+            SUM(
+                CASE
+                    WHEN attended = 1 THEN 1
+                    ELSE 0
+                END
+            ) AS attended
+        FROM attendance_daily
         WHERE LOWER(TRIM(semester)) = LOWER(TRIM(%s))
           AND (
                 UPPER(TRIM(COALESCE(subject_id, '')))
@@ -3427,12 +3439,13 @@ def _practical_attendance_map(
 
     for row in cur.fetchall():
         sbrn = str(row[0] or '').strip()
+
         if not sbrn:
             continue
 
         try:
-            attended = float(row[1] or 0)
-            delivered = float(row[2] or 0)
+            delivered = float(row[1] or 0)
+            attended = float(row[2] or 0)
         except (TypeError, ValueError):
             result[sbrn] = 0.0
             continue
@@ -3442,6 +3455,8 @@ def _practical_attendance_map(
             continue
 
         percentage = attended / delivered
+
+        # Keep percentage safely between 0% and 100%.
         percentage = max(0.0, min(percentage, 1.0))
 
         marks = round(
