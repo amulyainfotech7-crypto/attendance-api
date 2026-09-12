@@ -8087,94 +8087,350 @@ def diagnostic_attendance_transfer_in(
 # UNIVERSAL SYNC DOWNLOAD (SAFE + FAST)
 # ======================================================
 
+# ======================================================
+# UNIVERSAL SYNC DOWNLOAD
+# TIMETABLE-SAFE + DELTA-SAFE VERSION
+# ======================================================
+
 @app.get("/sync-generic/{table_name}")
-def universal_sync_download(table_name: str, since: Optional[str] = None):
+def universal_sync_download(
+    table_name: str,
+    since: Optional[str] = None
+):
+
+    # ==================================================
+    # 1. VALIDATE TABLE
+    # ==================================================
 
     allowed_tables = get_sync_tables()
 
     if table_name not in allowed_tables:
-        raise HTTPException(status_code=400, detail="Invalid table")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid table"
+        )
 
-    conn = connect_db()
-    cur = conn.cursor()
+    conn = None
 
     try:
 
-        # --------------------------------------------------
-        # Detect if table has last_updated column
-        # --------------------------------------------------
-        cur.execute("""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name=%s
-        """, (table_name,))
+        # ==================================================
+        # 2. CONNECT DATABASE
+        # ==================================================
 
-        columns_in_table = [r[0] for r in cur.fetchall()]
-        has_last_updated = "last_updated" in columns_in_table
+        conn = connect_db()
+        cur = conn.cursor()
+
+        # ==================================================
+        # 3. GET ACTUAL TABLE COLUMNS
+        # ==================================================
+
+        cur.execute(
+            """
+            SELECT
+                column_name,
+                data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (table_name,)
+        )
+
+        column_info = cur.fetchall()
+
+        if not column_info:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Table '{table_name}' not found"
+            )
+
+        columns_in_table = [
+            row[0]
+            for row in column_info
+        ]
+
+        column_types = {
+            row[0]: row[1]
+            for row in column_info
+        }
+
+        has_last_updated = (
+            "last_updated" in columns_in_table
+        )
+
+        # ==================================================
+        # 4. DEBUG INFORMATION
+        # ==================================================
+
+        print("\n" + "=" * 80)
+        print("☁ UNIVERSAL CLOUD DOWNLOAD")
+        print("=" * 80)
+        print("Table:", table_name)
+        print("Since:", since)
+        print(
+            "Has last_updated:",
+            has_last_updated
+        )
+
+        if table_name == "timetable_slots":
+            print(
+                "🕒 TIMETABLE SYNC REQUEST RECEIVED"
+            )
+
+        # ==================================================
+        # 5. BUILD SELECT QUERY
+        # ==================================================
+
+        base_query = (
+            f'SELECT * FROM "{table_name}"'
+        )
 
         params = ()
 
-        # --------------------------------------------------
-        # Build safe query
-        # --------------------------------------------------
-        base_query = f'SELECT * FROM "{table_name}"'
+        # ==================================================
+        # 6. INCREMENTAL SYNC
+        # ==================================================
 
         if since and has_last_updated:
 
             try:
-                parsed = datetime.fromisoformat(since)
-            except Exception:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid 'since' timestamp format"
+
+                parsed_since = datetime.fromisoformat(
+                    since
                 )
 
-            base_query += " WHERE last_updated > %s"
-            params = (parsed,)
+            except ValueError:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid 'since' timestamp format. "
+                        "Expected ISO format."
+                    )
+                )
+
+            # ------------------------------------------------
+            # TIMESTAMP / TIMESTAMPTZ
+            # ------------------------------------------------
+
+            last_updated_type = (
+                column_types.get(
+                    "last_updated",
+                    ""
+                ).lower()
+            )
+
+            if last_updated_type in (
+                "timestamp without time zone",
+                "timestamp with time zone",
+                "date",
+            ):
+
+                base_query += """
+                    WHERE last_updated > %s
+                """
+
+                params = (
+                    parsed_since,
+                )
+
+            # ------------------------------------------------
+            # TEXT / VARCHAR LAST_UPDATED
+            # ------------------------------------------------
+            #
+            # Some older databases may store timestamps
+            # as TEXT. In that case compare ISO strings.
+            # ------------------------------------------------
+
+            else:
+
+                base_query += """
+                    WHERE last_updated > %s
+                """
+
+                params = (
+                    parsed_since.isoformat(),
+                )
+
+        # ==================================================
+        # 7. ORDER RESULTS
+        # ==================================================
 
         if has_last_updated:
-            base_query += " ORDER BY last_updated ASC"
-        else:
-            base_query += " ORDER BY 1"
 
-        cur.execute(base_query, params)
+            base_query += """
+                ORDER BY last_updated ASC
+            """
+
+        else:
+
+            base_query += """
+                ORDER BY 1
+            """
+
+        # ==================================================
+        # 8. EXECUTE QUERY
+        # ==================================================
+
+        print(
+            "☁ Executing Cloud query:"
+        )
+
+        print(
+            base_query
+        )
+
+        cur.execute(
+            base_query,
+            params
+        )
 
         rows = cur.fetchall() or []
-        columns = [d[0] for d in cur.description] if cur.description else []
+
+        columns = [
+            description[0]
+            for description in cur.description
+        ]
+
+        print(
+            f"☁ Cloud rows returned: {len(rows)}"
+        )
+
+        # ==================================================
+        # 9. CONVERT DATABASE ROWS TO JSON-SAFE RECORDS
+        # ==================================================
+
+        records = []
+        latest_sync = None
+
+        for row in rows:
+
+            record = dict(
+                zip(
+                    columns,
+                    row
+                )
+            )
+
+            # ----------------------------------------------
+            # Convert datetime/date/time values
+            # to JSON-safe ISO strings
+            # ----------------------------------------------
+
+            for key, value in list(
+                record.items()
+            ):
+
+                if value is None:
+                    continue
+
+                if hasattr(
+                    value,
+                    "isoformat"
+                ):
+
+                    try:
+
+                        record[key] = (
+                            value.isoformat()
+                        )
+
+                    except Exception:
+                        pass
+
+            # ----------------------------------------------
+            # Latest sync cursor
+            # ----------------------------------------------
+
+            if (
+                "last_updated" in record
+                and record["last_updated"] is not None
+            ):
+
+                latest_sync = (
+                    record["last_updated"]
+                )
+
+            records.append(
+                record
+            )
+
+        # ==================================================
+        # 10. TIMETABLE-SPECIFIC DEBUG
+        # ==================================================
+
+        if table_name == "timetable_slots":
+
+            print(
+                "🕒 TIMETABLE CLOUD DOWNLOAD COMPLETE"
+            )
+
+            print(
+                f"   Rows returned : {len(records)}"
+            )
+
+            print(
+                f"   Latest sync   : {latest_sync}"
+            )
+
+        # ==================================================
+        # 11. FINAL RESPONSE
+        # ==================================================
+
+        return {
+            "status": "success",
+            "table": table_name,
+            "count": len(records),
+            "latest_sync": latest_sync,
+            "records": records
+        }
+
+    # ==================================================
+    # 12. PRESERVE HTTP EXCEPTIONS
+    # ==================================================
+
+    except HTTPException:
+        raise
+
+    # ==================================================
+    # 13. DATABASE / SERVER ERROR
+    # ==================================================
 
     except Exception as e:
-        release_db(conn)
-        raise HTTPException(status_code=500, detail=str(e))
 
-    release_db(conn)
+        print("\n" + "=" * 80)
+        print("❌ UNIVERSAL CLOUD DOWNLOAD FAILED")
+        print("=" * 80)
+        print("Table:", table_name)
+        print("Since:", since)
+        print(
+            "Error:",
+            repr(e)
+        )
 
-    records = []
-    latest_sync = None
+        import traceback
 
-    for row in rows:
+        traceback.print_exc()
 
-        record = dict(zip(columns, row))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
-        # --------------------------------------------------
-        # Convert datetime → ISO format
-        # --------------------------------------------------
-        for k, v in record.items():
-            if hasattr(v, "isoformat"):
-                record[k] = v.isoformat()
+    # ==================================================
+    # 14. ALWAYS RELEASE DATABASE CONNECTION
+    # ==================================================
 
-        if "last_updated" in record:
-            latest_sync = record["last_updated"]
+    finally:
 
-        records.append(record)
+        if conn:
 
-    return {
-        "status": "success",
-        "table": table_name,
-        "count": len(records),
-        "latest_sync": latest_sync,
-        "records": records
-    }
-
+            try:
+                release_db(conn)
+            except Exception:
+                pass
 
 # ======================================================
 # 🔥 RESULT SUBJECTS SYNC
