@@ -1111,7 +1111,7 @@ def ensure_subject_semester_map(conn, cur):
 
     print("=" * 80)
 
-
+    
 # ======================================================
 # STARTUP – CREATE TABLES (FINAL PRODUCTION SAFE VERSION)
 # ======================================================
@@ -3931,28 +3931,20 @@ def sync_faculty_from_cloud(since: Optional[str] = None):
 # 🔥 SYNC TIMETABLE (LOCAL → CLOUD) – FINAL SAFE VERSION
 # ======================================================
 
-# ======================================================
-# 🔥 SYNC TIMETABLE (LOCAL → CLOUD)
-# DYNAMIC / FK SAFE / NO HARDCODED SUBJECTS
-# ======================================================
-
 @app.post("/sync/timetable")
 def sync_timetable(records: list = Body(...)):
 
     if not records:
-        return {
-            "status": "no_data",
-            "rows_processed": 0
-        }
+        return {"status": "no_data"}
 
     conn = connect_db()
     cur = conn.cursor()
 
     try:
 
-        # ==================================================
-        # 1. ENSURE FACULTY TABLE
-        # ==================================================
+        # ======================================================
+        # FACULTY TABLE
+        # ======================================================
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS faculty(
@@ -3963,419 +3955,123 @@ def sync_timetable(records: list = Body(...)):
                 email TEXT,
                 designation TEXT,
                 username TEXT,
-                last_updated TIMESTAMP
-                    DEFAULT CURRENT_TIMESTAMP,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 version INTEGER DEFAULT 1,
                 is_deleted INTEGER DEFAULT 0
             )
         """)
+
+        # ------------------------------------------------------
+        # SAFE FACULTY USERNAME COLUMN MIGRATION
+        # ------------------------------------------------------
 
         cur.execute("""
             ALTER TABLE faculty
             ADD COLUMN IF NOT EXISTS username TEXT
         """)
 
-        # ==================================================
-        # 2. ENSURE SUBJECTS TABLE
-        # ==================================================
+        print("✅ Faculty username column verified")
 
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS subjects(
-                subject_id TEXT,
-                subject_name TEXT NOT NULL,
-                department TEXT,
-                semester TEXT,
-                type TEXT,
-                PRIMARY KEY (
-                    subject_id,
-                    semester,
-                    department
-                )
-            )
-        """)
-
-        # ==================================================
-        # 3. ENSURE SUBJECT-SEMESTER MAP
-        #
-        # This is dynamic.
-        # Nothing is hard-coded.
-        # ==================================================
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS subject_semester_map (
-                subject_id TEXT NOT NULL,
-                semester TEXT NOT NULL,
-                department TEXT NOT NULL,
-                section TEXT NOT NULL DEFAULT 'ALL',
-                last_updated TIMESTAMP
-                    DEFAULT CURRENT_TIMESTAMP,
-                version INTEGER DEFAULT 1,
-                sync_pending INTEGER DEFAULT 0
-            )
-        """)
-
-        # ==================================================
-        # 4. SAFE COLUMN MIGRATION
-        # ==================================================
-
-        cur.execute("""
-            ALTER TABLE subject_semester_map
-            ADD COLUMN IF NOT EXISTS section
-            TEXT DEFAULT 'ALL'
-        """)
-
-        cur.execute("""
-            ALTER TABLE subject_semester_map
-            ADD COLUMN IF NOT EXISTS last_updated
-            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        """)
-
-        cur.execute("""
-            ALTER TABLE subject_semester_map
-            ADD COLUMN IF NOT EXISTS version
-            INTEGER DEFAULT 1
-        """)
-
-        cur.execute("""
-            ALTER TABLE subject_semester_map
-            ADD COLUMN IF NOT EXISTS sync_pending
-            INTEGER DEFAULT 0
-        """)
-
-        # ==================================================
-        # 5. NORMALIZE INCOMING TIMETABLE DATA
-        # ==================================================
+        # --------------------------------------------------
+        # Normalize records
+        # --------------------------------------------------
 
         normalized = []
 
         for r in records:
 
-            subject_id = r.get("subject_id")
-
-            if subject_id is not None:
-                subject_id = str(subject_id).strip()
-
-            department = r.get("department")
-
-            if department is not None:
-                department = str(department).strip()
-
-            semester = r.get("semester")
-
-            if semester is not None:
-                semester = str(semester).strip()
-
-            section = r.get("section")
-
-            if section is None:
-                section = "ALL"
-            else:
-                section = str(section).strip() or "ALL"
-
-            faculty_id = r.get("faculty_id")
-
-            if faculty_id is not None:
-                faculty_id = str(faculty_id).strip()
-
             normalized.append({
-                "department": department,
-                "semester": semester,
-                "section": section,
+                "department": r.get("department"),
+                "semester": r.get("semester"),
+                "section": r.get("section"),
                 "day": r.get("day"),
                 "period_no": r.get("period_no"),
                 "period_len": r.get("period_len"),
                 "type": r.get("type"),
-                "subject_id": subject_id,
-                "faculty_id": faculty_id,
+                "subject_id": r.get("subject_id"),
+                "faculty_id": r.get("faculty_id"),
                 "room": r.get("room"),
-                "last_updated":
-                    r.get("last_updated")
-                    or datetime.utcnow(),
-                "version":
-                    r.get("version", 1)
+                "last_updated": r.get("last_updated") or datetime.utcnow(),
+                "version": r.get("version",1)
             })
 
-        # ==================================================
-        # 6. CREATE MISSING SUBJECTS FIRST
-        #
-        # IMPORTANT:
-        #
-        # timetable_slots has an FK to subjects.
-        #
-        # Therefore subjects MUST exist before
-        # timetable_slots is inserted.
-        #
-        # The subject information comes entirely from
-        # the incoming timetable records.
-        #
-        # NO HARDCODED SUBJECT IDs.
-        # ==================================================
-
-        subject_records = {}
-
-        for r in normalized:
-
-            subject_id = r.get("subject_id")
-            semester = r.get("semester")
-            department = r.get("department")
-            subject_type = r.get("type")
-
-            if not subject_id:
-                continue
-
-            if not semester:
-                continue
-
-            if not department:
-                continue
-
-            key = (
-                subject_id,
-                semester,
-                department
-            )
-
-            if key not in subject_records:
-
-                subject_records[key] = {
-                    "subject_id": subject_id,
-                    "semester": semester,
-                    "department": department,
-                    "type": subject_type
-                }
-
-        # ==================================================
-        # 7. INSERT MISSING SUBJECT MASTER ROWS
-        #
-        # Existing subject names/types are preserved.
-        #
-        # Only genuinely missing rows are created.
-        #
-        # Because timetable data has no subject_name,
-        # subject_id is used only as a temporary fallback
-        # for newly discovered subjects.
-        #
-        # A later normal subjects sync can replace the
-        # subject_name with the authoritative value.
-        # ==================================================
-
-        for subject_data in subject_records.values():
-
-            cur.execute("""
-                INSERT INTO subjects (
-                    subject_id,
-                    subject_name,
-                    department,
-                    semester,
-                    type
-                )
-                VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s
-                )
-                ON CONFLICT DO NOTHING
-            """, (
-                subject_data["subject_id"],
-                subject_data["subject_id"],
-                subject_data["department"],
-                subject_data["semester"],
-                subject_data["type"]
-            ))
-
-        # ==================================================
-        # 8. CREATE SUBJECT-SEMESTER MAPPINGS DYNAMICALLY
-        # ==================================================
-
-        for r in normalized:
-
-            subject_id = r.get("subject_id")
-            semester = r.get("semester")
-            department = r.get("department")
-            section = r.get("section") or "ALL"
-
-            if not subject_id:
-                continue
-
-            if not semester:
-                continue
-
-            if not department:
-                continue
-
-            cur.execute("""
-                INSERT INTO subject_semester_map (
-                    subject_id,
-                    semester,
-                    department,
-                    section,
-                    last_updated,
-                    version,
-                    sync_pending
-                )
-                VALUES (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    0
-                )
-                ON CONFLICT DO NOTHING
-            """, (
-                subject_id,
-                semester,
-                department,
-                section,
-                r["last_updated"],
-                r["version"]
-            ))
-
-        # ==================================================
-        # 9. INSERT / UPDATE TIMETABLE
-        #
-        # At this point the referenced subjects already
-        # exist, so the FK can be satisfied.
-        # ==================================================
+        # --------------------------------------------------
+        # UPSERT TIMETABLE
+        # --------------------------------------------------
 
         query = """
-            INSERT INTO timetable_slots
-            (
-                department,
-                semester,
-                section,
-                day,
-                period_no,
-                period_len,
-                type,
-                subject_id,
-                faculty_id,
-                room,
-                last_updated,
-                version
-            )
-            VALUES
-            (
-                %(department)s,
-                %(semester)s,
-                %(section)s,
-                %(day)s,
-                %(period_no)s,
-                %(period_len)s,
-                %(type)s,
-                %(subject_id)s,
-                %(faculty_id)s,
-                %(room)s,
-                %(last_updated)s,
-                %(version)s
-            )
+        INSERT INTO timetable_slots
+        (department,semester,section,day,period_no,
+         period_len,type,subject_id,faculty_id,room,
+         last_updated,version)
 
-            ON CONFLICT (
-                department,
-                semester,
-                section,
-                day,
-                period_no
-            )
+        VALUES
+        (%(department)s,%(semester)s,%(section)s,%(day)s,%(period_no)s,
+         %(period_len)s,%(type)s,%(subject_id)s,%(faculty_id)s,%(room)s,
+         %(last_updated)s,%(version)s)
 
-            DO UPDATE SET
-                period_len =
-                    EXCLUDED.period_len,
-
-                type =
-                    EXCLUDED.type,
-
-                subject_id =
-                    EXCLUDED.subject_id,
-
-                faculty_id =
-                    EXCLUDED.faculty_id,
-
-                room =
-                    EXCLUDED.room,
-
-                last_updated =
-                    EXCLUDED.last_updated,
-
-                version =
-                    EXCLUDED.version
-
-            WHERE timetable_slots.version
-                  <= EXCLUDED.version
+        ON CONFLICT (department,semester,section,day,period_no)
+        DO UPDATE SET
+            period_len = EXCLUDED.period_len,
+            type = EXCLUDED.type,
+            subject_id = EXCLUDED.subject_id,
+            faculty_id = EXCLUDED.faculty_id,
+            room = EXCLUDED.room,
+            last_updated = EXCLUDED.last_updated,
+            version = EXCLUDED.version
+        WHERE timetable_slots.version <= EXCLUDED.version;
         """
 
-        execute_batch(
-            cur,
-            query,
-            normalized
-        )
-
-        # ==================================================
-        # 10. COMMIT EVERYTHING AT ONCE
-        # ==================================================
+        execute_batch(cur, query, normalized)
 
         conn.commit()
 
-        # ==================================================
-        # 11. REALTIME BROADCAST
-        # ==================================================
+        # --------------------------------------------------
+        # 🔥 AUTO CREATE SUBJECTS FROM TIMETABLE
+        # --------------------------------------------------
+
+        cur.execute("""
+        INSERT INTO subjects (subject_id,subject_name,department,semester,type)
+        SELECT DISTINCT
+            subject_id,
+            subject_id,
+            department,
+            semester,
+            type
+        FROM timetable_slots
+        WHERE subject_id IS NOT NULL
+        ON CONFLICT DO NOTHING
+        """)
+
+        conn.commit()
+
+        # --------------------------------------------------
+        # Broadcast realtime update
+        # --------------------------------------------------
 
         try:
-
             loop = asyncio.get_running_loop()
-
-            loop.create_task(
-                broadcast_event("timetable_slots")
-            )
-
+            loop.create_task(broadcast_event("timetable_slots"))
         except RuntimeError:
             pass
 
-        # ==================================================
-        # 12. SUCCESS
-        # ==================================================
-
-        return {
-            "status": "success",
-            "rows_processed": len(normalized),
-            "subjects_processed":
-                len(subject_records)
-        }
-
     except Exception as e:
 
-        if conn:
-
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-
-        print(
-            "❌ TIMETABLE SYNC FAILED:",
-            str(e)
-        )
+        conn.rollback()
+        release_db(conn)
 
         raise HTTPException(
             status_code=500,
             detail=str(e)
         )
 
-    finally:
+    release_db(conn)
 
-        if conn:
+    return {
+        "status":"success",
+        "rows_processed":len(normalized)
+    }
 
-            try:
-                release_db(conn)
-            except Exception:
-
-                try:
-                    conn.close()
-                except Exception:
-                    pass
 # ======================================================
 # 🔥 CLOUD → DESKTOP TIMETABLE SYNC (INCREMENTAL SAFE)
 # ======================================================
