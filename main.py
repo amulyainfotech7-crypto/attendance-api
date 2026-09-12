@@ -5266,7 +5266,6 @@ def delete_cloud_row(table: str, row_id: str):
     # --------------------------------------------------
     # SECURITY: ONLY ALLOW REAL APPLICATION TABLES
     # --------------------------------------------------
-
     allowed_tables = {
         "holidays",
         "rooms",
@@ -5281,11 +5280,16 @@ def delete_cloud_row(table: str, row_id: str):
         "results_semester",
         "result_subjects",
         "exam_marks",
+
+        # 🔥 EXAM SCHEDULE
+        "exams",
+
         "master_attendance",
         "faculty_leave_substitute",
     }
 
     if table not in allowed_tables:
+
         release_db(conn)
 
         raise HTTPException(
@@ -5308,6 +5312,8 @@ def delete_cloud_row(table: str, row_id: str):
                 (row_id,)
             )
 
+            deleted_rows = cur.rowcount
+
         # --------------------------------------------------
         # STUDENTS
         # --------------------------------------------------
@@ -5320,6 +5326,8 @@ def delete_cloud_row(table: str, row_id: str):
                 """,
                 (row_id,)
             )
+
+            deleted_rows = cur.rowcount
 
         # --------------------------------------------------
         # ROOMS
@@ -5334,6 +5342,8 @@ def delete_cloud_row(table: str, row_id: str):
                 (row_id,)
             )
 
+            deleted_rows = cur.rowcount
+
         # --------------------------------------------------
         # SUBJECTS
         # --------------------------------------------------
@@ -5347,6 +5357,8 @@ def delete_cloud_row(table: str, row_id: str):
                 (row_id,)
             )
 
+            deleted_rows = cur.rowcount
+
         # --------------------------------------------------
         # FACULTY
         # --------------------------------------------------
@@ -5358,6 +5370,59 @@ def delete_cloud_row(table: str, row_id: str):
                 WHERE faculty_id = %s
                 """,
                 (row_id,)
+            )
+
+            deleted_rows = cur.rowcount
+
+        # --------------------------------------------------
+        # EXAM SCHEDULE
+        # --------------------------------------------------
+        # IMPORTANT:
+        #
+        # Desktop sync sends:
+        #
+        #     table = "exams"
+        #     row_id = exams.id
+        #
+        # Therefore the Cloud exam schedule must be
+        # deleted using the PostgreSQL "id" column.
+        #
+        # exam_marks are NOT touched.
+        # --------------------------------------------------
+        elif table == "exams":
+
+            try:
+                exam_id = int(str(row_id).strip())
+            except Exception:
+
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid exams DELETE id. "
+                        "Expected numeric exam id."
+                    )
+                )
+
+            print("\n" + "=" * 80)
+            print("🗑 EXAM SCHEDULE CLOUD DELETE")
+            print(
+                f"   Exam ID : {exam_id}"
+            )
+            print("=" * 80)
+
+            cur.execute(
+                """
+                DELETE FROM exams
+                WHERE id = %s
+                """,
+                (exam_id,)
+            )
+
+            deleted_rows = cur.rowcount
+
+            print(
+                f"🗑 EXAM SCHEDULE ROWS DELETED: "
+                f"{deleted_rows}"
             )
 
         # --------------------------------------------------
@@ -5483,19 +5548,25 @@ def delete_cloud_row(table: str, row_id: str):
 
             import json
 
-            # The substitution table uses a logical identity rather
-            # than relying on a SQLite/PostgreSQL auto-increment ID.
-            # The desktop queue may therefore send row_id as JSON.
+            # The substitution table uses a logical identity
+            # rather than relying on a SQLite/PostgreSQL
+            # auto-increment ID.
+            #
+            # The desktop queue may therefore send row_id
+            # as JSON.
             #
             # Supported row_id formats:
-            #   1. JSON logical key containing the substitution fields
-            #   2. Numeric cloud id, when available
+            #
+            #   1. JSON logical key
+            #   2. Numeric cloud id
 
             deleted_rows = 0
 
             key_data = None
+
             try:
                 key_data = json.loads(row_id)
+
             except Exception:
                 key_data = None
 
@@ -5504,19 +5575,25 @@ def delete_cloud_row(table: str, row_id: str):
                 department = str(
                     key_data.get("department", "")
                 ).strip()
+
                 semester = str(
                     key_data.get("semester", "")
                 ).strip()
+
                 class_date = str(
                     key_data.get("class_date", "")
                 ).strip()
+
                 period_no = key_data.get("period_no")
+
                 section = str(
                     key_data.get("section", "")
                 ).strip()
+
                 subject_id = str(
                     key_data.get("subject_id", "")
                 ).strip()
+
                 original_faculty_id = str(
                     key_data.get("original_faculty_id", "")
                 ).strip()
@@ -5530,25 +5607,45 @@ def delete_cloud_row(table: str, row_id: str):
                     subject_id,
                     original_faculty_id,
                 ]):
+
                     raise HTTPException(
                         status_code=400,
                         detail=(
                             "Incomplete faculty_leave_substitute "
                             "DELETE key. Required: department, "
                             "semester, class_date, period_no, "
-                            "section, subject_id, original_faculty_id."
+                            "section, subject_id, "
+                            "original_faculty_id."
                         )
                     )
 
                 print("\n" + "=" * 80)
-                print("🗑 FACULTY LEAVE / SUBSTITUTE CLOUD DELETE")
-                print(f"   Department           : {department}")
-                print(f"   Semester             : {semester}")
-                print(f"   Class Date           : {class_date}")
-                print(f"   Period               : {period_no}")
-                print(f"   Section              : {section}")
-                print(f"   Subject              : {subject_id}")
-                print(f"   Original Faculty     : {original_faculty_id}")
+                print(
+                    "🗑 FACULTY LEAVE / SUBSTITUTE "
+                    "CLOUD DELETE"
+                )
+                print(
+                    f"   Department           : {department}"
+                )
+                print(
+                    f"   Semester             : {semester}"
+                )
+                print(
+                    f"   Class Date           : {class_date}"
+                )
+                print(
+                    f"   Period               : {period_no}"
+                )
+                print(
+                    f"   Section              : {section}"
+                )
+                print(
+                    f"   Subject              : {subject_id}"
+                )
+                print(
+                    f"   Original Faculty     : "
+                    f"{original_faculty_id}"
+                )
                 print("=" * 80)
 
                 cur.execute(
@@ -5577,17 +5674,23 @@ def delete_cloud_row(table: str, row_id: str):
 
             else:
 
-                # Fallback for installations where the cloud table
-                # exposes an integer/surrogate id and the queue stores
-                # that id directly.
+                # Fallback for installations where the cloud
+                # table exposes an integer/surrogate id.
                 try:
-                    numeric_id = int(str(row_id).strip())
+
+                    numeric_id = int(
+                        str(row_id).strip()
+                    )
+
                 except Exception:
+
                     raise HTTPException(
                         status_code=400,
                         detail=(
-                            "Invalid faculty_leave_substitute DELETE key. "
-                            "Expected logical-key JSON or numeric id."
+                            "Invalid "
+                            "faculty_leave_substitute "
+                            "DELETE key. Expected "
+                            "logical-key JSON or numeric id."
                         )
                     )
 
@@ -5602,8 +5705,8 @@ def delete_cloud_row(table: str, row_id: str):
                 deleted_rows = cur.rowcount
 
             print(
-                f"🗑 FACULTY LEAVE / SUBSTITUTE ROWS DELETED: "
-                f"{deleted_rows}"
+                f"🗑 FACULTY LEAVE / SUBSTITUTE "
+                f"ROWS DELETED: {deleted_rows}"
             )
 
         # --------------------------------------------------
@@ -5613,6 +5716,7 @@ def delete_cloud_row(table: str, row_id: str):
 
             # For tables not having a special key above,
             # use the standard "id" primary key.
+
             cur.execute(
                 f"""
                 DELETE FROM "{table}"
@@ -5623,6 +5727,9 @@ def delete_cloud_row(table: str, row_id: str):
 
             deleted_rows = cur.rowcount
 
+        # --------------------------------------------------
+        # COMMIT
+        # --------------------------------------------------
         conn.commit()
 
         # --------------------------------------------------
@@ -5648,6 +5755,11 @@ def delete_cloud_row(table: str, row_id: str):
             "rows_deleted": deleted_rows
         }
 
+    except HTTPException:
+
+        conn.rollback()
+        raise
+
     except Exception as e:
 
         conn.rollback()
@@ -5665,6 +5777,8 @@ def delete_cloud_row(table: str, row_id: str):
     finally:
 
         release_db(conn)
+
+
 # ======================================================
 # CHECK ATTENDANCE EXISTS (FIXED)
 # ======================================================
