@@ -4308,6 +4308,468 @@ def get_semesters(department: str):
         release_db(conn)
 
 # ======================================================
+# 🔥 EXAM MARKS SYNC
+# LOCAL SQLITE → CLOUD POSTGRESQL
+#
+# IMPORTANT:
+# ❌ NEVER COPY LOCAL SQLITE "id"
+# ✅ CLOUD OWNS exam_marks.id
+# ✅ LOGICAL IDENTITY:
+#    sbrn + semester + exam_type + subject_id
+# ======================================================
+
+@app.post("/sync/exam_marks")
+def sync_exam_marks(records: list = Body(...)):
+
+    if not records:
+        return {
+            "status": "no_data",
+            "rows": 0
+        }
+
+    conn = None
+    cur = None
+
+    saved_rows = 0
+
+    try:
+
+        conn = connect_db()
+        cur = conn.cursor()
+
+        print("\n" + "=" * 80)
+        print("☁ EXAM MARKS SYNC STARTED")
+        print("📦 Incoming rows:", len(records))
+        print("=" * 80)
+
+        for index, row in enumerate(records, start=1):
+
+            if not isinstance(row, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Invalid exam_marks row {index}: "
+                        "expected object"
+                    )
+                )
+
+            # ==================================================
+            # REQUIRED LOGICAL IDENTITY
+            # ==================================================
+
+            sbrn = str(
+                row.get("sbrn") or ""
+            ).strip()
+
+            semester = str(
+                row.get("semester") or ""
+            ).strip()
+
+            exam_type = str(
+                row.get("exam_type") or ""
+            ).strip()
+
+            subject_id = str(
+                row.get("subject_id") or ""
+            ).strip()
+
+            if not sbrn:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"exam_marks row {index}: "
+                        "missing sbrn"
+                    )
+                )
+
+            if not semester:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"exam_marks row {index}: "
+                        "missing semester"
+                    )
+                )
+
+            if not exam_type:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"exam_marks row {index}: "
+                        "missing exam_type"
+                    )
+                )
+
+            if not subject_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"exam_marks row {index}: "
+                        "missing subject_id"
+                    )
+                )
+
+            # ==================================================
+            # MARKS
+            # ==================================================
+
+            marks = row.get("marks")
+
+            if marks is not None:
+                try:
+                    numeric_marks = float(marks)
+
+                    if not numeric_marks.is_integer():
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Marks must be a whole number "
+                                f"for {sbrn}."
+                            )
+                        )
+
+                    marks = int(numeric_marks)
+
+                except HTTPException:
+                    raise
+
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Invalid marks for {sbrn}."
+                        )
+                    )
+
+            # ==================================================
+            # MAX MARKS
+            # ==================================================
+
+            max_marks = row.get("max_marks")
+
+            if max_marks is not None:
+                try:
+                    numeric_max = float(max_marks)
+
+                    if not numeric_max.is_integer():
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"max_marks must be a whole number "
+                                f"for {sbrn}."
+                            )
+                        )
+
+                    max_marks = int(numeric_max)
+
+                except HTTPException:
+                    raise
+
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Invalid max_marks for {sbrn}."
+                        )
+                    )
+
+            # ==================================================
+            # DATE
+            # ==================================================
+
+            exam_date = row.get("exam_date")
+
+            if exam_date is not None:
+                exam_date = str(
+                    exam_date
+                ).strip()
+
+                if exam_date == "":
+                    exam_date = None
+
+            # ==================================================
+            # VERSION
+            # ==================================================
+
+            incoming_version = row.get("version")
+
+            try:
+                incoming_version = int(
+                    incoming_version
+                    if incoming_version is not None
+                    else 1
+                )
+
+            except (TypeError, ValueError):
+                incoming_version = 1
+
+            if incoming_version < 1:
+                incoming_version = 1
+
+            # ==================================================
+            # FIND EXISTING CLOUD RECORD
+            #
+            # NEVER use local SQLite id.
+            # ==================================================
+
+            cur.execute("""
+                SELECT
+                    id,
+                    version
+                FROM exam_marks
+                WHERE LOWER(TRIM(sbrn))
+                        = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(semester))
+                        = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(exam_type))
+                        = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(COALESCE(subject_id, '')))
+                        = LOWER(TRIM(%s))
+                ORDER BY id DESC
+                LIMIT 1
+            """, (
+                sbrn,
+                semester,
+                exam_type,
+                subject_id,
+            ))
+
+            existing = cur.fetchone()
+
+            # ==================================================
+            # UPDATE EXISTING CLOUD RECORD
+            # ==================================================
+
+            if existing is not None:
+
+                cloud_id = existing[0]
+
+                cloud_version = (
+                    int(existing[1])
+                    if existing[1] is not None
+                    else 0
+                )
+
+                # ----------------------------------------------
+                # Do not allow an older client version to
+                # overwrite a newer Cloud version.
+                # ----------------------------------------------
+
+                if incoming_version < cloud_version:
+
+                    print(
+                        "⚠️ Skipping older exam_marks version:"
+                    )
+
+                    print(
+                        f"   SBRN={sbrn} | "
+                        f"Subject={subject_id} | "
+                        f"Exam={exam_type} | "
+                        f"Incoming={incoming_version} | "
+                        f"Cloud={cloud_version}"
+                    )
+
+                    continue
+
+                new_version = max(
+                    cloud_version + 1,
+                    incoming_version
+                )
+
+                cur.execute("""
+                    UPDATE exam_marks
+                    SET
+                        marks = %s,
+                        max_marks = %s,
+                        exam_date = %s,
+                        last_updated = CURRENT_TIMESTAMP,
+                        version = %s,
+                        sync_pending = 0
+                    WHERE id = %s
+                """, (
+                    marks,
+                    max_marks,
+                    exam_date,
+                    new_version,
+                    cloud_id,
+                ))
+
+                print(
+                    "✅ EXAM MARK UPDATED → "
+                    f"SBRN={sbrn} | "
+                    f"Subject={subject_id} | "
+                    f"Exam={exam_type} | "
+                    f"Version={new_version}"
+                )
+
+            # ==================================================
+            # INSERT NEW CLOUD RECORD
+            # ==================================================
+
+            else:
+
+                # ----------------------------------------------
+                # Cloud-side ID allocation.
+                #
+                # Local SQLite ID is NEVER used.
+                # ----------------------------------------------
+
+                cur.execute("""
+                    SELECT pg_advisory_xact_lock(7465321)
+                """)
+
+                cur.execute("""
+                    SELECT COALESCE(MAX(id), 0) + 1
+                    FROM exam_marks
+                """)
+
+                next_id_row = cur.fetchone()
+
+                if (
+                    not next_id_row
+                    or next_id_row[0] is None
+                ):
+                    next_id = 1
+                else:
+                    next_id = int(
+                        next_id_row[0]
+                    )
+
+                cur.execute("""
+                    INSERT INTO exam_marks
+                    (
+                        id,
+                        sbrn,
+                        semester,
+                        exam_type,
+                        subject_id,
+                        marks,
+                        max_marks,
+                        exam_date,
+                        last_updated,
+                        version,
+                        sync_pending
+                    )
+                    VALUES
+                    (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        CURRENT_TIMESTAMP,
+                        %s,
+                        0
+                    )
+                """, (
+                    next_id,
+                    sbrn,
+                    semester,
+                    exam_type,
+                    subject_id,
+                    marks,
+                    max_marks,
+                    exam_date,
+                    incoming_version,
+                ))
+
+                # ----------------------------------------------
+                # Keep PostgreSQL sequence synchronized.
+                # ----------------------------------------------
+
+                cur.execute("""
+                    SELECT pg_get_serial_sequence(
+                        'exam_marks',
+                        'id'
+                    )
+                """)
+
+                sequence_row = cur.fetchone()
+
+                if (
+                    sequence_row
+                    and sequence_row[0]
+                ):
+                    cur.execute("""
+                        SELECT setval(
+                            %s,
+                            %s,
+                            true
+                        )
+                    """, (
+                        sequence_row[0],
+                        next_id,
+                    ))
+
+                print(
+                    "✅ EXAM MARK INSERTED → "
+                    f"SBRN={sbrn} | "
+                    f"Subject={subject_id} | "
+                    f"Exam={exam_type} | "
+                    f"Cloud ID={next_id} | "
+                    f"Version={incoming_version}"
+                )
+
+            saved_rows += 1
+
+        # ==================================================
+        # COMMIT ONLY AFTER ALL ROWS SUCCEED
+        # ==================================================
+
+        conn.commit()
+
+        print("\n" + "=" * 80)
+        print(
+            "☁ EXAM MARKS SYNC SUCCESS → "
+            f"{saved_rows} row(s)"
+        )
+        print("=" * 80)
+
+        return {
+            "status": "success",
+            "rows": saved_rows
+        }
+
+    except HTTPException:
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        raise
+
+    except Exception as e:
+
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        print("\n" + "=" * 80)
+        print("❌ EXAM MARKS SYNC FAILED")
+        print("❌ ERROR:", str(e))
+        print("=" * 80)
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
+        if conn:
+            try:
+                release_db(conn)
+            except Exception:
+                pass
+
+
+# ======================================================
 # 🔥 FACULTY SYNC (LOCAL → CLOUD)
 # ======================================================
 
