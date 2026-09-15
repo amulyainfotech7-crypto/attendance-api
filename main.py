@@ -2817,6 +2817,63 @@ def login(data: LoginModel):
                 )
 
         # ==================================================
+        # LOAD FACULTY PROFILE
+        # ==================================================
+
+        faculty_name = None
+        faculty_designation = None
+        faculty_department = None
+
+        if faculty_id:
+            cur.execute("""
+                SELECT
+                    name,
+                    designation,
+                    department
+                FROM faculty
+                WHERE LOWER(TRIM(faculty_id))
+                    = LOWER(TRIM(%s))
+                LIMIT 1
+            """, (faculty_id,))
+
+            profile_row = cur.fetchone()
+
+            if profile_row:
+                faculty_name = (
+                    str(profile_row[0]).strip()
+                    if profile_row[0] is not None
+                    else None
+                )
+
+                faculty_designation = (
+                    str(profile_row[1]).strip()
+                    if profile_row[1] is not None
+                    else None
+                )
+
+                faculty_department = (
+                    str(profile_row[2]).strip()
+                    if profile_row[2] is not None
+                    else None
+                )
+
+        # ==================================================
+        # FACULTY PROFILE DEBUG
+        # ==================================================
+
+        print(
+            f"   Faculty Name    : {faculty_name}"
+        )
+
+        print(
+            f"   Designation     : {faculty_designation}"
+        )
+
+        print(
+            f"   Department      : {faculty_department}"
+        )
+
+        # ==================================================
         # LOGIN RESPONSE
         # ==================================================
 
@@ -2824,7 +2881,12 @@ def login(data: LoginModel):
             "status": "success",
             "username": db_username,
             "role": role,
-            "faculty_id": faculty_id
+            "faculty_id": faculty_id,
+
+            # Actual faculty profile
+            "name": faculty_name,
+            "designation": faculty_designation,
+            "department": faculty_department,
         }
 
     except HTTPException:
