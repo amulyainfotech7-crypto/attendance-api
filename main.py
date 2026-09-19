@@ -6598,6 +6598,11 @@ def get_students(
         → return only students belonging to that section.
 
     Manually detained/locked students are excluded.
+
+    IMPORTANT:
+        sr_no is the permanently allocated student serial number.
+        It is returned to Flutter so Section B continues from
+        Section A instead of restarting from 1.
     """
 
     # ======================================================
@@ -6658,7 +6663,8 @@ def get_students(
                     name,
                     department,
                     semester,
-                    section
+                    section,
+                    sr_no
                 FROM students
                 WHERE
                     LOWER(
@@ -6704,7 +6710,8 @@ def get_students(
                     'ACTIVE'
 
                 ORDER BY
-                    sbrn
+                    sr_no ASC,
+                    sbrn ASC
             """, (
                 department,
                 semester
@@ -6725,7 +6732,8 @@ def get_students(
                     name,
                     department,
                     semester,
-                    section
+                    section,
+                    sr_no
                 FROM students
                 WHERE
                     LOWER(
@@ -6783,7 +6791,8 @@ def get_students(
                     'ACTIVE'
 
                 ORDER BY
-                    sbrn
+                    sr_no ASC,
+                    sbrn ASC
             """, (
                 department,
                 semester,
@@ -6802,7 +6811,8 @@ def get_students(
                 "name": r[1],
                 "department": r[2],
                 "semester": r[3],
-                "section": r[4]
+                "section": r[4],
+                "sr_no": r[5]
             }
             for r in rows
         ]
@@ -6822,7 +6832,7 @@ def get_students(
     finally:
 
         release_db(conn)
-
+        
 from fastapi import Body, HTTPException
 
 # ======================================================
