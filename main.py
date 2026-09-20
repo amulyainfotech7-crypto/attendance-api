@@ -6598,14 +6598,27 @@ def get_workshop_students(
     Return active students assigned to the selected
     Workshop Group.
 
-    Workshop attendance uses:
-        subject_id = WORKSHOP_PRACTICE
-        subject    = Workshop Practice
-        group      = Group 1 / Group 2 / Group 3 / Group 4
+    Workshop group display numbering is dynamic.
 
-    Student identity remains SBRN.
+    Example:
 
-    The existing /students endpoint is NOT changed.
+        Group 1 = 17 students
+            -> 1 - 17
+
+        Group 2 = 16 students
+            -> 18 - 33
+
+        Group 3 = 17 students
+            -> 34 - 50
+
+    The next group always starts from:
+        previous group's ending number + 1
+
+    IMPORTANT:
+        - display_serial is ONLY for display.
+        - SBRN remains the permanent student identity.
+        - sr_no is NOT modified.
+        - Existing /students endpoint is NOT changed.
     """
 
     # ==================================================
@@ -6686,7 +6699,7 @@ def get_workshop_students(
             )
 
         # ==================================================
-        # LOAD WORKSHOP STUDENTS
+        # LOAD SELECTED WORKSHOP GROUP
         # ==================================================
 
         if section.lower() == "all":
@@ -6877,7 +6890,7 @@ def get_workshop_students(
         rows = cur.fetchall()
 
         # ==================================================
-        # BUILD RESPONSE
+        # BUILD SELECTED GROUP STUDENTS
         # ==================================================
 
         students = []
@@ -6895,17 +6908,266 @@ def get_workshop_students(
             })
 
         # ==================================================
+        # GET COUNTS OF ALL WORKSHOP GROUPS
+        # ==================================================
+        #
+        # This is the important part.
+        #
+        # We need to know how many students are in every
+        # group before the selected group.
+        #
+        # Example:
+        #
+        # Group 1 = 17
+        # Group 2 = 16
+        # Group 3 = 17
+        #
+        # Therefore:
+        #
+        # Group 1 starts at 1
+        # Group 2 starts at 18
+        # Group 3 starts at 34
+        #
+        # ==================================================
+
+        cur.execute("""
+            SELECT
+                TRIM(student_group) AS student_group,
+                COUNT(*) AS student_count
+            FROM students
+            WHERE
+                LOWER(
+                    TRIM(
+                        COALESCE(department, '')
+                    )
+                )
+                =
+                LOWER(
+                    TRIM(%s)
+                )
+
+                AND
+
+                LOWER(
+                    TRIM(
+                        COALESCE(semester, '')
+                    )
+                )
+                =
+                LOWER(
+                    TRIM(%s)
+                )
+
+                AND
+
+                COALESCE(
+                    status_locked,
+                    0
+                ) = 0
+
+                AND
+
+                COALESCE(
+                    is_deleted,
+                    0
+                ) = 0
+
+                AND
+
+                UPPER(
+                    TRIM(
+                        COALESCE(
+                            academic_status,
+                            'ACTIVE'
+                        )
+                    )
+                )
+                = 'ACTIVE'
+
+            GROUP BY
+                TRIM(student_group)
+        """, (
+            department,
+            semester
+        ))
+
+        group_rows = cur.fetchall()
+
+        # ==================================================
+        # CREATE NORMALIZED GROUP COUNT MAP
+        # ==================================================
+
+        group_counts = {}
+
+        for group_row in group_rows:
+
+            group_name = str(
+                group_row[0] or ""
+            ).strip()
+
+            student_count = int(
+                group_row[1] or 0
+            )
+
+            if not group_name:
+                continue
+
+            group_counts[
+                group_name.lower()
+            ] = student_count
+
+        # ==================================================
+        # FIND CURRENT GROUP NUMBER
+        # ==================================================
+
+        import re
+
+        group_match = re.search(
+            r"group\s*(\d+)",
+            group.lower()
+        )
+
+        if group_match:
+
+            current_group_number = int(
+                group_match.group(1)
+            )
+
+        else:
+
+            current_group_number = None
+
+        # ==================================================
+        # CALCULATE DISPLAY START
+        # ==================================================
+
+        display_start = 1
+
+        if current_group_number is not None:
+
+            for previous_group_number in range(
+                1,
+                current_group_number
+            ):
+
+                previous_group_name = (
+                    f"group {previous_group_number}"
+                )
+
+                previous_count = group_counts.get(
+                    previous_group_name.lower(),
+                    0
+                )
+
+                display_start += previous_count
+
+        # ==================================================
+        # ASSIGN DISPLAY SERIAL
+        # ==================================================
+        #
+        # Example:
+        #
+        # Group 1:
+        #     start = 1
+        #     17 students
+        #     -> 1 ... 17
+        #
+        # Group 2:
+        #     start = 18
+        #     16 students
+        #     -> 18 ... 33
+        #
+        # Group 3:
+        #     start = 34
+        #     17 students
+        #     -> 34 ... 50
+        #
+        # ==================================================
+
+        for index, student in enumerate(
+            students
+        ):
+
+            student["display_serial"] = (
+                display_start + index
+            )
+
+        # ==================================================
+        # CALCULATE DISPLAY RANGE
+        # ==================================================
+
+        if students:
+
+            display_end = (
+                display_start
+                + len(students)
+                - 1
+            )
+
+            display_range = (
+                f"{display_start}-{display_end}"
+            )
+
+        else:
+
+            display_end = display_start - 1
+            display_range = "0-0"
+
+        # ==================================================
         # LOG
         # ==================================================
 
+        print()
+        print("=" * 70)
+        print("🛠 WORKSHOP STUDENTS API")
+        print("=" * 70)
+
         print(
-            "🛠 WORKSHOP STUDENTS API → "
-            f"Department={department} | "
-            f"Semester={semester} | "
-            f"Group={group} | "
-            f"Section={section} | "
-            f"Students={len(students)}"
+            "Department       :",
+            department
         )
+
+        print(
+            "Semester         :",
+            semester
+        )
+
+        print(
+            "Group            :",
+            group
+        )
+
+        print(
+            "Section          :",
+            section
+        )
+
+        print(
+            "Students         :",
+            len(students)
+        )
+
+        print(
+            "Display Start    :",
+            display_start
+        )
+
+        print(
+            "Display End      :",
+            display_end
+        )
+
+        print(
+            "Display Range    :",
+            display_range
+        )
+
+        print(
+            "All Group Counts :",
+            group_counts
+        )
+
+        print("=" * 70)
 
         # ==================================================
         # RETURN
@@ -6913,13 +7175,50 @@ def get_workshop_students(
 
         return {
             "status": "success",
-            "subject_id": "WORKSHOP_PRACTICE",
-            "subject": "Workshop Practice",
-            "department": department,
-            "semester": semester,
-            "group": group,
-            "section": section,
-            "students": students
+
+            # Actual Engineering Workshop Practice
+            # subject ID is semester-specific.
+            "subject_id": (
+                "EWP1_P"
+                if semester.strip().lower()
+                == "1st semester"
+                else
+                "EWP2_P"
+                if semester.strip().lower()
+                == "2nd semester"
+                else
+                "EWP"
+            ),
+
+            "subject":
+                "Engineering Workshop Practice",
+
+            "department":
+                department,
+
+            "semester":
+                semester,
+
+            "group":
+                group,
+
+            "section":
+                section,
+
+            "student_count":
+                len(students),
+
+            "display_start":
+                display_start,
+
+            "display_end":
+                display_end,
+
+            "display_range":
+                display_range,
+
+            "students":
+                students
         }
 
     # ==================================================
