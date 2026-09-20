@@ -6577,6 +6577,379 @@ def get_subjects_by_date(
 
 
 # ======================================================
+# GET WORKSHOP STUDENTS
+# ======================================================
+
+@app.get("/workshop/students")
+def get_workshop_students(
+    department: str,
+    semester: str,
+    group: str,
+    section: str = "all"
+):
+    """
+    Return active students assigned to the selected
+    Workshop Group.
+
+    Workshop attendance uses:
+        subject_id = WORKSHOP_PRACTICE
+        subject    = Workshop Practice
+        group      = Group 1 / Group 2 / Group 3 / Group 4
+
+    Student identity remains SBRN.
+
+    The existing /students endpoint is NOT changed.
+    """
+
+    # ==================================================
+    # NORMALIZE INPUT
+    # ==================================================
+
+    department = str(
+        department or ""
+    ).strip()
+
+    semester = str(
+        semester or ""
+    ).strip()
+
+    group = str(
+        group or ""
+    ).strip()
+
+    section = str(
+        section or "all"
+    ).strip()
+
+    # ==================================================
+    # VALIDATE INPUT
+    # ==================================================
+
+    if not department:
+        raise HTTPException(
+            status_code=400,
+            detail="Department is required"
+        )
+
+    if not semester:
+        raise HTTPException(
+            status_code=400,
+            detail="Semester is required"
+        )
+
+    if not group:
+        raise HTTPException(
+            status_code=400,
+            detail="Workshop Group is required"
+        )
+
+    # ==================================================
+    # DATABASE
+    # ==================================================
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        # ==================================================
+        # CHECK student_group COLUMN
+        # ==================================================
+
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'students'
+                  AND column_name = 'student_group'
+            )
+        """)
+
+        student_group_exists = cur.fetchone()[0]
+
+        if not student_group_exists:
+
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "students.student_group column does not "
+                    "exist in Cloud database."
+                )
+            )
+
+        # ==================================================
+        # LOAD WORKSHOP STUDENTS
+        # ==================================================
+
+        if section.lower() == "all":
+
+            cur.execute("""
+                SELECT
+                    sbrn,
+                    name,
+                    department,
+                    semester,
+                    section,
+                    student_group,
+                    sr_no
+                FROM students
+                WHERE
+                    LOWER(
+                        TRIM(
+                            COALESCE(department, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    LOWER(
+                        TRIM(
+                            COALESCE(semester, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    LOWER(
+                        TRIM(
+                            COALESCE(student_group, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    COALESCE(
+                        status_locked,
+                        0
+                    ) = 0
+
+                    AND
+
+                    COALESCE(
+                        is_deleted,
+                        0
+                    ) = 0
+
+                    AND
+
+                    UPPER(
+                        TRIM(
+                            COALESCE(
+                                academic_status,
+                                'ACTIVE'
+                            )
+                        )
+                    )
+                    = 'ACTIVE'
+
+                ORDER BY
+                    CASE
+                        WHEN sr_no ~ '^[0-9]+$'
+                        THEN CAST(sr_no AS INTEGER)
+                        ELSE 999999
+                    END,
+                    name
+            """, (
+                department,
+                semester,
+                group
+            ))
+
+        else:
+
+            cur.execute("""
+                SELECT
+                    sbrn,
+                    name,
+                    department,
+                    semester,
+                    section,
+                    student_group,
+                    sr_no
+                FROM students
+                WHERE
+                    LOWER(
+                        TRIM(
+                            COALESCE(department, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    LOWER(
+                        TRIM(
+                            COALESCE(semester, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    LOWER(
+                        TRIM(
+                            COALESCE(student_group, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    LOWER(
+                        TRIM(
+                            COALESCE(section, '')
+                        )
+                    )
+                    =
+                    LOWER(
+                        TRIM(%s)
+                    )
+
+                    AND
+
+                    COALESCE(
+                        status_locked,
+                        0
+                    ) = 0
+
+                    AND
+
+                    COALESCE(
+                        is_deleted,
+                        0
+                    ) = 0
+
+                    AND
+
+                    UPPER(
+                        TRIM(
+                            COALESCE(
+                                academic_status,
+                                'ACTIVE'
+                            )
+                        )
+                    )
+                    = 'ACTIVE'
+
+                ORDER BY
+                    CASE
+                        WHEN sr_no ~ '^[0-9]+$'
+                        THEN CAST(sr_no AS INTEGER)
+                        ELSE 999999
+                    END,
+                    name
+            """, (
+                department,
+                semester,
+                group,
+                section
+            ))
+
+        rows = cur.fetchall()
+
+        # ==================================================
+        # BUILD RESPONSE
+        # ==================================================
+
+        students = []
+
+        for row in rows:
+
+            students.append({
+                "sbrn": row[0],
+                "name": row[1],
+                "department": row[2],
+                "semester": row[3],
+                "section": row[4],
+                "student_group": row[5],
+                "sr_no": row[6]
+            })
+
+        # ==================================================
+        # LOG
+        # ==================================================
+
+        print(
+            "🛠 WORKSHOP STUDENTS API → "
+            f"Department={department} | "
+            f"Semester={semester} | "
+            f"Group={group} | "
+            f"Section={section} | "
+            f"Students={len(students)}"
+        )
+
+        # ==================================================
+        # RETURN
+        # ==================================================
+
+        return {
+            "status": "success",
+            "subject_id": "WORKSHOP_PRACTICE",
+            "subject": "Workshop Practice",
+            "department": department,
+            "semester": semester,
+            "group": group,
+            "section": section,
+            "students": students
+        }
+
+    # ==================================================
+    # HTTP EXCEPTION
+    # ==================================================
+
+    except HTTPException:
+        raise
+
+    # ==================================================
+    # GENERAL ERROR
+    # ==================================================
+
+    except Exception as e:
+
+        print(
+            "❌ GET /workshop/students ERROR:",
+            repr(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to load workshop students: "
+                f"{str(e)}"
+            )
+        )
+
+    # ==================================================
+    # CLOSE DATABASE
+    # ==================================================
+
+    finally:
+
+        release_db(conn)
+
+# ======================================================
 # GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
 # ======================================================
 
@@ -6832,7 +7205,7 @@ def get_students(
     finally:
 
         release_db(conn)
-        
+
 from fastapi import Body, HTTPException
 
 # ======================================================
