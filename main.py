@@ -7956,8 +7956,24 @@ def mark_workshop_attendance(data: dict = Body(...)):
         # 4️⃣ FIXED WORKSHOP SUBJECT
         # --------------------------------------------------
 
-        workshop_subject_id = "WORKSHOP_PRACTICE"
-        workshop_subject_name = "Workshop Practice"
+        semester_key = semester.strip().lower()
+
+        if semester_key == "1st semester":
+            workshop_subject_id = "EWP1_P"
+
+        elif semester_key == "2nd semester":
+            workshop_subject_id = "EWP2_P"
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Engineering Workshop Practice is configured "
+                    f"only for 1st and 2nd Semester, not {semester}"
+                )
+            )
+
+        workshop_subject_name = "Engineering Workshop Practice"
 
         # --------------------------------------------------
         # 5️⃣ VERIFY STUDENTS BELONG TO SELECTED GROUP
