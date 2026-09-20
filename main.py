@@ -1656,11 +1656,18 @@ def startup():
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS year_semester TEXT")
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS academic_status TEXT DEFAULT 'REGULAR'")
 
+        # 🛠 WORKSHOP GROUP
+        cur.execute("""
+            ALTER TABLE students
+            ADD COLUMN IF NOT EXISTS student_group TEXT
+        """)
+
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1")
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS sync_pending INTEGER DEFAULT 0")
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0")
         cur.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP")
+
         # 🔒 MANUAL DETENTION LOCK COLUMN (FINAL FIX)
         cur.execute("""
             ALTER TABLE students
