@@ -8232,95 +8232,6 @@ def mark_workshop_attendance(data: dict = Body(...)):
 
 
 # ======================================================
-# 🛠 WORKSHOP STUDENTS
-# ======================================================
-
-@app.get("/workshop/students")
-def get_workshop_students(
-    department: str,
-    semester: str,
-    group: str,
-    section: str = "all"
-):
-    conn = connect_db()
-    cur = conn.cursor()
-
-    try:
-        cur.execute(
-            """
-            SELECT
-                sbrn,
-                name,
-                department,
-                semester,
-                section,
-                sr_no
-            FROM students
-            WHERE LOWER(TRIM(department)) = LOWER(TRIM(%s))
-              AND LOWER(TRIM(semester)) = LOWER(TRIM(%s))
-              AND LOWER(TRIM(student_group)) = LOWER(TRIM(%s))
-            ORDER BY
-                CASE
-                    WHEN UPPER(TRIM(section)) = 'A' THEN 1
-                    WHEN UPPER(TRIM(section)) = 'B' THEN 2
-                    ELSE 3
-                END,
-                name
-            """,
-            (
-                department,
-                semester,
-                group,
-            )
-        )
-
-        rows = cur.fetchall()
-
-        students = []
-
-        for row in rows:
-            students.append({
-                "sbrn": row[0],
-                "name": row[1],
-                "department": row[2],
-                "semester": row[3],
-                "section": row[4],
-                "sr_no": row[5],
-                "student_group": group,
-            })
-
-        print()
-        print("=" * 70)
-        print("🛠 WORKSHOP STUDENTS")
-        print("=" * 70)
-        print("Department :", department)
-        print("Semester   :", semester)
-        print("Group      :", group)
-        print("Students   :", len(students))
-        print("=" * 70)
-
-        return {
-            "status": "success",
-            "subject_id": "WORKSHOP_PRACTICE",
-            "subject": "Workshop Practice",
-            "department": department,
-            "semester": semester,
-            "group": group,
-            "students": students,
-        }
-
-    except Exception as e:
-        print("❌ WORKSHOP STUDENTS ERROR:", str(e))
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-    finally:
-        release_db(conn)
-
-
-# ======================================================
 # 🛠 WORKSHOP ATTENDANCE EXISTS
 # ======================================================
 
@@ -8386,11 +8297,11 @@ def workshop_attendance_exists(
 
 
 # ======================================================
-# 🛠 WORKSHOP ATTENDANCE
+# MARK ATTENDANCE (PERMANENT DESKTOP-ALIGNED VERSION)
 # ======================================================
 
-@app.post("/workshop/attendance")
-def mark_workshop_attendance(data: dict = Body(...)):
+@app.post("/mark-attendance")
+def mark_attendance(data: AttendanceRequest):
 
     conn = connect_db()
     cur = conn.cursor()
