@@ -8262,25 +8262,54 @@ def workshop_attendance_exists(
     cur = conn.cursor()
 
     try:
+
+        # --------------------------------------------------
+        # 1️⃣ RESOLVE ACTUAL WORKSHOP SUBJECT ID
+        # --------------------------------------------------
+
+        semester_key = semester.strip().lower()
+
+        if semester_key == "1st semester":
+            workshop_subject_id = "EWP1_P"
+
+        elif semester_key == "2nd semester":
+            workshop_subject_id = "EWP2_P"
+
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Engineering Workshop Practice is configured "
+                    f"only for 1st and 2nd Semester, not {semester}"
+                )
+            )
+
+        # --------------------------------------------------
+        # 2️⃣ CHECK ATTENDANCE
+        # --------------------------------------------------
+
         cur.execute(
             """
             SELECT 1
             FROM attendance_daily a
             INNER JOIN students s
                 ON s.sbrn = a.sbrn
-            WHERE LOWER(TRIM(s.department)) = LOWER(TRIM(%s))
-              AND LOWER(TRIM(a.semester)) = LOWER(TRIM(%s))
-              AND LOWER(TRIM(a.subject_id)) =
-                  LOWER(TRIM(%s))
-              AND a.class_date = %s
-              AND LOWER(TRIM(s.student_group)) =
-                  LOWER(TRIM(%s))
+            WHERE LOWER(TRIM(s.department))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(a.semester))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(a.subject_id))
+                    = LOWER(TRIM(%s))
+              AND DATE(a.class_date)
+                    = DATE(%s)
+              AND LOWER(TRIM(s.student_group))
+                    = LOWER(TRIM(%s))
             LIMIT 1
             """,
             (
                 department,
                 semester,
-                "WORKSHOP_PRACTICE",
+                workshop_subject_id,
                 date,
                 group,
             )
@@ -8288,10 +8317,15 @@ def workshop_attendance_exists(
 
         exists = cur.fetchone() is not None
 
+        # --------------------------------------------------
+        # 3️⃣ DEBUG LOG
+        # --------------------------------------------------
+
         print(
             "🔎 WORKSHOP ATTENDANCE EXISTS → "
             f"Department={department} | "
             f"Semester={semester} | "
+            f"Subject={workshop_subject_id} | "
             f"Group={group} | "
             f"Date={date} | "
             f"Exists={exists}"
@@ -8301,8 +8335,15 @@ def workshop_attendance_exists(
             "exists": exists
         }
 
+    except HTTPException:
+        raise
+
     except Exception as e:
-        print("❌ WORKSHOP ATTENDANCE EXISTS ERROR:", str(e))
+        print(
+            "❌ WORKSHOP ATTENDANCE EXISTS ERROR:",
+            str(e)
+        )
+
         raise HTTPException(
             status_code=500,
             detail=str(e)
@@ -8310,7 +8351,6 @@ def workshop_attendance_exists(
 
     finally:
         release_db(conn)
-
 
 # ======================================================
 # MARK ATTENDANCE (PERMANENT DESKTOP-ALIGNED VERSION)
