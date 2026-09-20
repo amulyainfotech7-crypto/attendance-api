@@ -7811,6 +7811,418 @@ def attendance_exists(
     finally:
         release_db(conn)
 
+# ======================================================
+# 🛠 WORKSHOP ATTENDANCE
+# ======================================================
+
+@app.post("/workshop/attendance")
+def mark_workshop_attendance(data: dict = Body(...)):
+    """
+    Workshop Staff Attendance
+
+    Expected payload:
+    {
+        "department": "Civil Engineering",
+        "semester": "1st Semester",
+        "workshop": "Computer Workshop",
+        "group": "Group 1",
+        "date": "2026-09-20",
+        "attendance": [
+            {
+                "sbrn": "STUDENT_SBRN",
+                "present": true
+            }
+        ]
+    }
+
+    Workshop subject is always:
+        WORKSHOP_PRACTICE
+
+    Student identity:
+        SBRN
+    """
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+
+        # --------------------------------------------------
+        # 1️⃣ READ AND VALIDATE DATA
+        # --------------------------------------------------
+
+        department = str(
+            data.get("department", "")
+        ).strip()
+
+        semester = str(
+            data.get("semester", "")
+        ).strip()
+
+        workshop = str(
+            data.get("workshop", "")
+        ).strip()
+
+        group = str(
+            data.get("group", "")
+        ).strip()
+
+        class_date = str(
+            data.get("date", "")
+        ).strip()
+
+        attendance_records = data.get(
+            "attendance",
+            []
+        )
+
+        if not department:
+            raise HTTPException(
+                status_code=400,
+                detail="Department is required"
+            )
+
+        if not semester:
+            raise HTTPException(
+                status_code=400,
+                detail="Semester is required"
+            )
+
+        if not workshop:
+            raise HTTPException(
+                status_code=400,
+                detail="Workshop is required"
+            )
+
+        if not group:
+            raise HTTPException(
+                status_code=400,
+                detail="Workshop group is required"
+            )
+
+        if not class_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Date is required"
+            )
+
+        if not isinstance(attendance_records, list):
+            raise HTTPException(
+                status_code=400,
+                detail="Attendance must be a list"
+            )
+
+        # --------------------------------------------------
+        # 2️⃣ VALIDATE DATE
+        # --------------------------------------------------
+
+        try:
+            attendance_date = datetime.strptime(
+                class_date,
+                "%Y-%m-%d"
+            ).date()
+
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid date format. Use YYYY-MM-DD"
+            )
+
+        # --------------------------------------------------
+        # 3️⃣ WORKING DAY CHECK
+        # --------------------------------------------------
+
+        if not is_working_day(
+            attendance_date,
+            department,
+            semester
+        ):
+            return {
+                "status": "holiday",
+                "message": (
+                    "Workshop attendance cannot be "
+                    "marked on a holiday"
+                )
+            }
+
+        # --------------------------------------------------
+        # 4️⃣ FIXED WORKSHOP SUBJECT
+        # --------------------------------------------------
+
+        workshop_subject_id = "WORKSHOP_PRACTICE"
+        workshop_subject_name = "Workshop Practice"
+
+        # --------------------------------------------------
+        # 5️⃣ VERIFY STUDENTS BELONG TO SELECTED GROUP
+        #
+        # student_group is already available in students.
+        # --------------------------------------------------
+
+        valid_sbrns = set()
+
+        if attendance_records:
+
+            requested_sbrns = []
+
+            for record in attendance_records:
+
+                if not isinstance(record, dict):
+                    continue
+
+                sbrn = str(
+                    record.get("sbrn", "")
+                ).strip()
+
+                if sbrn:
+                    requested_sbrns.append(sbrn)
+
+            if requested_sbrns:
+
+                cur.execute(
+                    """
+                    SELECT sbrn
+                    FROM students
+                    WHERE sbrn = ANY(%s)
+                      AND LOWER(TRIM(department))
+                          = LOWER(TRIM(%s))
+                      AND LOWER(TRIM(semester))
+                          = LOWER(TRIM(%s))
+                      AND LOWER(TRIM(student_group))
+                          = LOWER(TRIM(%s))
+                    """,
+                    (
+                        requested_sbrns,
+                        department,
+                        semester,
+                        group
+                    )
+                )
+
+                valid_sbrns = {
+                    str(row[0]).strip()
+                    for row in cur.fetchall()
+                }
+
+        # --------------------------------------------------
+        # 6️⃣ DO NOT ALLOW EMPTY / INVALID STUDENTS
+        # --------------------------------------------------
+
+        if not valid_sbrns:
+            return {
+                "status": "no_students",
+                "message": (
+                    "No valid students found for "
+                    f"{group}"
+                )
+            }
+
+        # --------------------------------------------------
+        # 7️⃣ PERMANENT DAILY LOCK
+        #
+        # Once Workshop Practice attendance has been
+        # saved for this group/date, don't overwrite it.
+        # --------------------------------------------------
+
+        cur.execute(
+            """
+            SELECT 1
+            FROM attendance_daily a
+            INNER JOIN students s
+                ON s.sbrn = a.sbrn
+            WHERE LOWER(TRIM(s.department))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(a.semester))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(a.subject_id))
+                    = LOWER(TRIM(%s))
+              AND a.class_date = %s
+              AND LOWER(TRIM(s.student_group))
+                    = LOWER(TRIM(%s))
+            LIMIT 1
+            """,
+            (
+                department,
+                semester,
+                workshop_subject_id,
+                attendance_date,
+                group
+            )
+        )
+
+        if cur.fetchone():
+
+            return {
+                "status": "already_marked",
+                "message": (
+                    "Workshop attendance already marked "
+                    "for this group and date."
+                )
+            }
+
+        # --------------------------------------------------
+        # 8️⃣ SAVE ATTENDANCE
+        # --------------------------------------------------
+
+        rows_saved = 0
+
+        for record in attendance_records:
+
+            if not isinstance(record, dict):
+                continue
+
+            sbrn = str(
+                record.get("sbrn", "")
+            ).strip()
+
+            if not sbrn:
+                continue
+
+            # Security check:
+            # only students from selected workshop group
+            # can be inserted.
+            if sbrn not in valid_sbrns:
+                continue
+
+            present = bool(
+                record.get("present", False)
+            )
+
+            cur.execute(
+                """
+                INSERT INTO attendance_daily
+                (
+                    sbrn,
+                    subject_id,
+                    subject,
+                    semester,
+                    section,
+                    class_date,
+                    attended,
+                    periods,
+                    last_updated
+                )
+                VALUES
+                (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    CURRENT_TIMESTAMP
+                )
+                ON CONFLICT
+                (
+                    sbrn,
+                    subject_id,
+                    semester,
+                    section,
+                    class_date
+                )
+                DO UPDATE SET
+                    attended = EXCLUDED.attended,
+                    periods = EXCLUDED.periods,
+                    last_updated = EXCLUDED.last_updated
+                """,
+                (
+                    sbrn,
+                    workshop_subject_id,
+                    workshop_subject_name,
+                    semester,
+                    group,
+                    attendance_date,
+                    1 if present else 0,
+                    1
+                )
+            )
+
+            rows_saved += 1
+
+        # --------------------------------------------------
+        # 9️⃣ NOTHING SAVED
+        # --------------------------------------------------
+
+        if rows_saved == 0:
+
+            conn.rollback()
+
+            return {
+                "status": "no_valid_data",
+                "message": "No valid attendance records received."
+            }
+
+        # --------------------------------------------------
+        # 🔟 COMMIT
+        # --------------------------------------------------
+
+        conn.commit()
+
+        # --------------------------------------------------
+        # 🔔 REALTIME UPDATE
+        # --------------------------------------------------
+
+        try:
+
+            loop = asyncio.get_running_loop()
+
+            loop.create_task(
+                broadcast_event(
+                    "attendance_daily"
+                )
+            )
+
+        except RuntimeError:
+            pass
+
+        # --------------------------------------------------
+        # 1️⃣1️⃣ SUCCESS
+        # --------------------------------------------------
+
+        print()
+        print("=" * 70)
+        print("🛠 WORKSHOP ATTENDANCE SAVED")
+        print("=" * 70)
+        print("Department :", department)
+        print("Semester   :", semester)
+        print("Workshop   :", workshop)
+        print("Group      :", group)
+        print("Date       :", class_date)
+        print("Students   :", rows_saved)
+        print("=" * 70)
+
+        return {
+            "status": "saved",
+            "subject_id": workshop_subject_id,
+            "subject": workshop_subject_name,
+            "workshop": workshop,
+            "group": group,
+            "date": class_date,
+            "students_saved": rows_saved
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+
+    except Exception as e:
+
+        conn.rollback()
+
+        print(
+            "❌ WORKSHOP ATTENDANCE ERROR:",
+            str(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+
+        release_db(conn)
 
 # ======================================================
 # MARK ATTENDANCE (PERMANENT DESKTOP-ALIGNED VERSION)
