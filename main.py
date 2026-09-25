@@ -3405,10 +3405,10 @@ def _verify_practical_faculty_assignment(
     department: str,
     semester: str,
     subject_id: str,
-    section: str,
+    group: str,
 ):
     """
-    Verify that the selected practical subject + section is
+    Verify that the selected practical subject is
     actually assigned to the logged-in faculty.
 
     timetable_slots remains the authoritative assignment source.
@@ -3441,14 +3441,13 @@ def _verify_practical_faculty_assignment(
         department,
         semester,
         subject_id,
-        section,
     ))
 
     if cur.fetchone() is None:
         raise HTTPException(
             status_code=403,
             detail=(
-                "Selected practical subject/section is not assigned "
+                "Selected practical subject is not assigned "
                 "to this faculty."
             )
         )
@@ -3551,7 +3550,7 @@ def get_practical_marks(
     department: str,
     semester: str,
     subject_id: str,
-    section: str,
+    group: str,
     practical_number: str,
 ):
 
@@ -3559,7 +3558,7 @@ def get_practical_marks(
     department = str(department or "").strip()
     semester = str(semester or "").strip()
     subject_id = str(subject_id or "").strip()
-    section = str(section or "").strip()
+    group = str(group or "").strip()
     practical_number = str(practical_number or "").strip()
 
     if not all([
@@ -3567,14 +3566,14 @@ def get_practical_marks(
         department,
         semester,
         subject_id,
-        section,
+        group,
         practical_number,
     ]):
         raise HTTPException(
             status_code=400,
             detail=(
                 "faculty_id, department, semester, subject_id, "
-                "section and practical_number are required"
+                "group and practical_number are required"
             )
         )
 
@@ -3599,7 +3598,7 @@ def get_practical_marks(
             department,
             semester,
             subject_id,
-            section,
+            group,
         )
 
         scheme = _practical_scheme(semester)
@@ -3648,7 +3647,7 @@ def get_practical_marks(
                     = LOWER(TRIM(%s))
               AND LOWER(TRIM(COALESCE(s.semester, '')))
                     = LOWER(TRIM(%s))
-              AND LOWER(TRIM(COALESCE(s.section, '')))
+              AND LOWER(TRIM(COALESCE(s.student_group, '')))
                     = LOWER(TRIM(%s))
               AND COALESCE(s.status_locked, 0) = 0
               AND UPPER(TRIM(COALESCE(s.academic_status, 'ACTIVE')))
@@ -3669,7 +3668,7 @@ def get_practical_marks(
             viva_type,
             department,
             semester,
-            section,
+            group,
         ))
 
         rows = cur.fetchall()
@@ -3740,7 +3739,7 @@ def get_practical_marks(
             f"Department={department} | "
             f"Semester={semester} | "
             f"Subject={subject_id} | "
-            f"Section={section} | "
+            f"Group={group} | "
             f"Practical={practical_number} | "
             f"Rows={len(result)}"
         )
@@ -3751,7 +3750,7 @@ def get_practical_marks(
             "department": department,
             "semester": semester,
             "subject_id": subject_id,
-            "section": section,
+            "group": group,
             "practical_number": practical_number,
             **scheme,
             "students": result,
@@ -3795,7 +3794,7 @@ def save_practical_marks(
     department = str(payload.get("department") or "").strip()
     semester = str(payload.get("semester") or "").strip()
     subject_id = str(payload.get("subject_id") or "").strip()
-    section = str(payload.get("section") or "").strip()
+    group = str(payload.get("group") or "").strip()
     practical_number = str(
         payload.get("practical_number") or ""
     ).strip()
@@ -3806,14 +3805,14 @@ def save_practical_marks(
         department,
         semester,
         subject_id,
-        section,
+        group,
         practical_number,
     ]):
         raise HTTPException(
             status_code=400,
             detail=(
                 "faculty_id, department, semester, subject_id, "
-                "section and practical_number are required"
+                "group and practical_number are required"
             )
         )
 
@@ -3842,7 +3841,7 @@ def save_practical_marks(
             department,
             semester,
             subject_id,
-            section,
+            group,
         )
 
         scheme = _practical_scheme(semester)
@@ -3912,7 +3911,7 @@ def save_practical_marks(
                 sbrn,
                 department,
                 semester,
-                section,
+                group,
             ))
 
             if cur.fetchone() is None:
@@ -3920,7 +3919,7 @@ def save_practical_marks(
                     status_code=403,
                     detail=(
                         f"Student {sbrn} is not an active student "
-                        "of the selected section."
+                        "of the selected group."
                     )
                 )
 
@@ -4116,7 +4115,7 @@ def save_practical_marks(
             f"Department={department} | "
             f"Semester={semester} | "
             f"Subject={subject_id} | "
-            f"Section={section} | "
+            f"Group={group} | "
             f"Practical={practical_number} | "
             f"Students={saved_students} | "
             f"Components={saved_components}"
@@ -4129,7 +4128,7 @@ def save_practical_marks(
             "department": department,
             "semester": semester,
             "subject_id": subject_id,
-            "section": section,
+            "group": group,
             "practical_number": practical_number,
             "students_saved": saved_students,
             "components_saved": saved_components,
