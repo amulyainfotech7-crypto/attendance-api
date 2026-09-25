@@ -3405,53 +3405,35 @@ def _verify_practical_faculty_assignment(
     department: str,
     semester: str,
     subject_id: str,
-    group: str,
 ):
-    """
-    Verify that the selected practical subject is
-    actually assigned to the logged-in faculty.
+    """Verify faculty assignment for a practical subject.
 
-    timetable_slots remains the authoritative assignment source.
+    Practical Marks student selection is GROUP-based, not
+    Section-based. Therefore group is intentionally not compared
+    with timetable_slots.section here.
     """
-
     cur.execute("""
         SELECT 1
         FROM timetable_slots t
-        WHERE LOWER(TRIM(t.faculty_id))
-              = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.department))
-              = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.semester))
-              = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.subject_id))
-              = LOWER(TRIM(%s))
-          AND LOWER(TRIM(COALESCE(t.section, '')))
-              = LOWER(TRIM(%s))
+        WHERE LOWER(TRIM(t.faculty_id)) = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.department)) = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.semester)) = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.subject_id)) = LOWER(TRIM(%s))
           AND t.subject_id IS NOT NULL
           AND TRIM(t.subject_id) <> ''
           AND (
                 UPPER(TRIM(COALESCE(t.type, '')))
                     IN ('LAB', 'PRACTICAL', 'PRACTICALS', 'WORKSHOP')
-                OR
-                UPPER(TRIM(t.subject_id)) LIKE '%%_P'
+                OR UPPER(TRIM(t.subject_id)) LIKE '%%_P'
               )
         LIMIT 1
-    """, (
-        faculty_id,
-        department,
-        semester,
-        subject_id,
-    ))
+    """, (faculty_id, department, semester, subject_id))
 
     if cur.fetchone() is None:
         raise HTTPException(
             status_code=403,
-            detail=(
-                "Selected practical subject is not assigned "
-                "to this faculty."
-            )
+            detail="Selected practical subject is not assigned to this faculty."
         )
-
 
 
 def _practical_attendance_map(
@@ -3598,7 +3580,6 @@ def get_practical_marks(
             department,
             semester,
             subject_id,
-            group,
         )
 
         scheme = _practical_scheme(semester)
@@ -3841,7 +3822,6 @@ def save_practical_marks(
             department,
             semester,
             subject_id,
-            group,
         )
 
         scheme = _practical_scheme(semester)
