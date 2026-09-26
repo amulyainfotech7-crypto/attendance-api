@@ -8141,6 +8141,27 @@ def save_class_test_marks(payload: dict = Body(...)):
 
             existing = cur.fetchone()
 
+            # PostgreSQL exam_marks.marks is NOT NULL. Therefore a blank
+            # Class Test field must NEVER be inserted/updated as NULL.
+            #
+            # Behaviour:
+            #   • blank + existing row  -> DELETE the saved mark
+            #   • blank + no existing row -> do nothing
+            #   • numeric mark -> UPDATE existing row or INSERT new row
+            #
+            # This also allows the faculty to save the whole class even when
+            # some students have not yet received a mark.
+            if numeric_marks is None:
+                if existing is not None:
+                    cur.execute(
+                        """
+                        DELETE FROM exam_marks
+                        WHERE id = %s
+                        """,
+                        (existing[0],),
+                    )
+                continue
+
             if existing is not None:
                 cur.execute(
                     """
