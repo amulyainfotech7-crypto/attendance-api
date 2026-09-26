@@ -3405,34 +3405,128 @@ def _verify_practical_faculty_assignment(
     department: str,
     semester: str,
     subject_id: str,
+    section: Optional[str] = None,
+    group: Optional[str] = None,
 ):
-    """Verify faculty assignment for a practical subject.
-
-    Practical Marks student selection is GROUP-based, not
-    Section-based. Therefore group is intentionally not compared
-    with timetable_slots.section here.
     """
+    Verify that the selected practical subject is assigned to the
+    logged-in faculty.
+
+    Practical Marks supports two independent selector modes:
+
+        Normal faculty:
+            Section A / Section B
+
+        Workshop faculty:
+            Group 1 / Group 2 / Group 3
+
+    The faculty assignment itself is authoritative from timetable_slots.
+    For normal Section mode, the selected section is also verified.
+    For Workshop Group mode, the workshop group is a student grouping
+    and is therefore NOT compared with timetable_slots.section.
+    """
+
+    faculty_id = str(faculty_id or "").strip()
+    department = str(department or "").strip()
+    semester = str(semester or "").strip()
+    subject_id = str(subject_id or "").strip()
+    section = str(section or "").strip()
+    group = str(group or "").strip()
+
+    if section and group:
+        raise HTTPException(
+            status_code=400,
+            detail="Only one of section or group may be supplied."
+        )
+
+    if not section and not group:
+        raise HTTPException(
+            status_code=400,
+            detail="Either section or group is required."
+        )
+
+    # ----------------------------------------------------------
+    # Workshop Group mode
+    # ----------------------------------------------------------
+    if group:
+        cur.execute("""
+            SELECT 1
+            FROM timetable_slots t
+            WHERE LOWER(TRIM(t.faculty_id))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(t.department))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(t.semester))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(t.subject_id))
+                    = LOWER(TRIM(%s))
+              AND t.subject_id IS NOT NULL
+              AND TRIM(t.subject_id) <> ''
+              AND (
+                    UPPER(TRIM(COALESCE(t.type, '')))
+                        IN ('LAB', 'PRACTICAL', 'PRACTICALS', 'WORKSHOP')
+                    OR
+                    UPPER(TRIM(t.subject_id)) LIKE '%%_P'
+                  )
+            LIMIT 1
+        """, (
+            faculty_id,
+            department,
+            semester,
+            subject_id,
+        ))
+
+        if cur.fetchone() is None:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Selected practical subject is not assigned "
+                    "to this faculty."
+                )
+            )
+
+        return
+
+    # ----------------------------------------------------------
+    # Normal Section mode
+    # ----------------------------------------------------------
     cur.execute("""
         SELECT 1
         FROM timetable_slots t
-        WHERE LOWER(TRIM(t.faculty_id)) = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.department)) = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.semester)) = LOWER(TRIM(%s))
-          AND LOWER(TRIM(t.subject_id)) = LOWER(TRIM(%s))
+        WHERE LOWER(TRIM(t.faculty_id))
+                = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.department))
+                = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.semester))
+                = LOWER(TRIM(%s))
+          AND LOWER(TRIM(t.subject_id))
+                = LOWER(TRIM(%s))
+          AND LOWER(TRIM(COALESCE(t.section, '')))
+                = LOWER(TRIM(%s))
           AND t.subject_id IS NOT NULL
           AND TRIM(t.subject_id) <> ''
           AND (
                 UPPER(TRIM(COALESCE(t.type, '')))
                     IN ('LAB', 'PRACTICAL', 'PRACTICALS', 'WORKSHOP')
-                OR UPPER(TRIM(t.subject_id)) LIKE '%%_P'
+                OR
+                UPPER(TRIM(t.subject_id)) LIKE '%%_P'
               )
         LIMIT 1
-    """, (faculty_id, department, semester, subject_id))
+    """, (
+        faculty_id,
+        department,
+        semester,
+        subject_id,
+        section,
+    ))
 
     if cur.fetchone() is None:
         raise HTTPException(
             status_code=403,
-            detail="Selected practical subject is not assigned to this faculty."
+            detail=(
+                "Selected practical subject/section is not assigned "
+                "to this faculty."
+            )
         )
 
 
@@ -3441,54 +3535,82 @@ def _practical_attendance_map(
     semester: str,
     subject_id: str,
     max_marks: int,
+    section: Optional[str] = None,
+    group: Optional[str] = None,
 ):
     """
     Automatic N-2026 practical attendance marks.
 
-    Source of truth is attendance_daily.
+    Source of truth:
+        attendance_daily
 
-    Flutter attendance is saved directly into attendance_daily.
-    Therefore practical attendance must be calculated from the same
-    table so that marks saved from Flutter are immediately reflected
-    when /practical-marks is fetched.
+    The selector is important because attendance_daily stores the
+    selected class grouping in its `section` column:
 
-    The calculation remains the same percentage-to-maximum scaling
-    used by the existing desktop practical IA logic.
+        Normal practical:
+            section = A / B
+
+        Workshop practical:
+            section = Group 1 / Group 2 / Group 3
+
+    Therefore attendance is calculated only for the selected
+    Section/Group instead of accidentally combining all groups.
     """
 
     if max_marks <= 0:
         return {}
 
+    section = str(section or "").strip()
+    group = str(group or "").strip()
+
+    if section and group:
+        raise HTTPException(
+            status_code=400,
+            detail="Only one of section or group may be supplied."
+        )
+
+    selector = group or section
+
+    if not selector:
+        raise HTTPException(
+            status_code=400,
+            detail="Either section or group is required."
+        )
+
     cur.execute("""
         SELECT
-            sbrn,
+            a.sbrn,
             COUNT(*) AS delivered,
             SUM(
                 CASE
-                    WHEN attended = 1 THEN 1
+                    WHEN a.attended = 1 THEN 1
                     ELSE 0
                 END
             ) AS attended
-        FROM attendance_daily
-        WHERE LOWER(TRIM(semester)) = LOWER(TRIM(%s))
+        FROM attendance_daily a
+        WHERE LOWER(TRIM(a.semester))
+                = LOWER(TRIM(%s))
           AND (
-                UPPER(TRIM(COALESCE(subject_id, '')))
+                UPPER(TRIM(COALESCE(a.subject_id, '')))
                     = UPPER(TRIM(%s))
                 OR
-                UPPER(TRIM(COALESCE(subject, '')))
+                UPPER(TRIM(COALESCE(a.subject, '')))
                     = UPPER(TRIM(%s))
               )
-        GROUP BY sbrn
+          AND LOWER(TRIM(COALESCE(a.section, '')))
+                = LOWER(TRIM(%s))
+        GROUP BY a.sbrn
     """, (
         semester,
         subject_id,
         subject_id,
+        selector,
     ))
 
     result = {}
 
     for row in cur.fetchall():
-        sbrn = str(row[0] or '').strip()
+        sbrn = str(row[0] or "").strip()
 
         if not sbrn:
             continue
@@ -3522,25 +3644,31 @@ def _practical_attendance_map(
     return result
 
 
-# ======================================================
-# GET PRACTICAL MARKS
-# ======================================================
-
 @app.get("/practical-marks")
 def get_practical_marks(
     faculty_id: str,
     department: str,
     semester: str,
     subject_id: str,
-    group: str,
-    practical_number: str,
+    group: Optional[str] = Query(default=None),
+    section: Optional[str] = Query(default=None),
+    practical_number: str = "",
 ):
+    """
+    Load Practical Marks for either:
+
+        Normal faculty  -> Section A/B
+        Workshop staff  -> Group 1/2/3
+
+    Exactly one selector is required.
+    """
 
     faculty_id = str(faculty_id or "").strip()
     department = str(department or "").strip()
     semester = str(semester or "").strip()
     subject_id = str(subject_id or "").strip()
     group = str(group or "").strip()
+    section = str(section or "").strip()
     practical_number = str(practical_number or "").strip()
 
     if not all([
@@ -3548,15 +3676,20 @@ def get_practical_marks(
         department,
         semester,
         subject_id,
-        group,
         practical_number,
     ]):
         raise HTTPException(
             status_code=400,
             detail=(
-                "faculty_id, department, semester, subject_id, "
-                "group and practical_number are required"
+                "faculty_id, department, semester, subject_id and "
+                "practical_number are required"
             )
+        )
+
+    if bool(group) == bool(section):
+        raise HTTPException(
+            status_code=400,
+            detail="Exactly one of group or section is required."
         )
 
     allowed_practicals = {
@@ -3580,6 +3713,8 @@ def get_practical_marks(
             department,
             semester,
             subject_id,
+            section=section or None,
+            group=group or None,
         )
 
         scheme = _practical_scheme(semester)
@@ -3594,7 +3729,18 @@ def get_practical_marks(
             f"{practical_number} – Practical Viva"
         )
 
-        cur.execute("""
+        # ----------------------------------------------------------
+        # Student selector
+        # ----------------------------------------------------------
+        # Normal faculty -> students.section
+        # Workshop staff -> students.student_group
+        # ----------------------------------------------------------
+        student_selector_column = (
+            "student_group" if group else "section"
+        )
+        student_selector_value = group or section
+
+        cur.execute(f"""
             SELECT
                 s.sbrn,
                 s.name,
@@ -3620,15 +3766,15 @@ def get_practical_marks(
             LEFT JOIN exam_marks em
                 ON em.sbrn = s.sbrn
                AND LOWER(TRIM(em.semester))
-                   = LOWER(TRIM(%s))
+                    = LOWER(TRIM(%s))
                AND LOWER(TRIM(em.subject_id))
-                   = LOWER(TRIM(%s))
+                    = LOWER(TRIM(%s))
                AND em.exam_type IN (%s, %s, %s)
             WHERE LOWER(TRIM(COALESCE(s.department, '')))
                     = LOWER(TRIM(%s))
               AND LOWER(TRIM(COALESCE(s.semester, '')))
                     = LOWER(TRIM(%s))
-              AND LOWER(TRIM(COALESCE(s.student_group, '')))
+              AND LOWER(TRIM(COALESCE(s.{student_selector_column}, '')))
                     = LOWER(TRIM(%s))
               AND COALESCE(s.status_locked, 0) = 0
               AND UPPER(TRIM(COALESCE(s.academic_status, 'ACTIVE')))
@@ -3649,7 +3795,7 @@ def get_practical_marks(
             viva_type,
             department,
             semester,
-            group,
+            student_selector_value,
         ))
 
         rows = cur.fetchall()
@@ -3662,12 +3808,14 @@ def get_practical_marks(
                 semester,
                 subject_id,
                 scheme["attendance_max"],
+                section=section or None,
+                group=group or None,
             )
 
         result = []
 
         for row in rows:
-            sbrn = str(row[0] or '').strip()
+            sbrn = str(row[0] or "").strip()
 
             try:
                 performance = (
@@ -3714,13 +3862,18 @@ def get_practical_marks(
                 "total": total,
             })
 
+        selector_label = (
+            f"Group={group}" if group
+            else f"Section={section}"
+        )
+
         print(
             "📊 PRACTICAL MARKS LOAD → "
             f"Faculty={faculty_id} | "
             f"Department={department} | "
             f"Semester={semester} | "
             f"Subject={subject_id} | "
-            f"Group={group} | "
+            f"{selector_label} | "
             f"Practical={practical_number} | "
             f"Rows={len(result)}"
         )
@@ -3731,7 +3884,8 @@ def get_practical_marks(
             "department": department,
             "semester": semester,
             "subject_id": subject_id,
-            "group": group,
+            "group": group or None,
+            "section": section or None,
             "practical_number": practical_number,
             **scheme,
             "students": result,
@@ -3776,6 +3930,7 @@ def save_practical_marks(
     semester = str(payload.get("semester") or "").strip()
     subject_id = str(payload.get("subject_id") or "").strip()
     group = str(payload.get("group") or "").strip()
+    section = str(payload.get("section") or "").strip()
     practical_number = str(
         payload.get("practical_number") or ""
     ).strip()
@@ -3786,15 +3941,20 @@ def save_practical_marks(
         department,
         semester,
         subject_id,
-        group,
         practical_number,
     ]):
         raise HTTPException(
             status_code=400,
             detail=(
-                "faculty_id, department, semester, subject_id, "
-                "group and practical_number are required"
+                "faculty_id, department, semester, subject_id and "
+                "practical_number are required"
             )
+        )
+
+    if bool(group) == bool(section):
+        raise HTTPException(
+            status_code=400,
+            detail="Exactly one of group or section is required."
         )
 
     if practical_number not in {
@@ -3822,6 +3982,8 @@ def save_practical_marks(
             department,
             semester,
             subject_id,
+            section=section or None,
+            group=group or None,
         )
 
         scheme = _practical_scheme(semester)
@@ -3873,7 +4035,17 @@ def save_practical_marks(
             # --------------------------------------------------
             # Student authorization / active-status validation
             # --------------------------------------------------
-            cur.execute("""
+            # Normal faculty validates students.section.
+            # Workshop faculty validates students.student_group.
+            student_selector_column = (
+                "student_group" if group else "section"
+            )
+            student_selector_value = group or section
+            selector_label = (
+                "group" if group else "section"
+            )
+
+            cur.execute(f"""
                 SELECT 1
                 FROM students
                 WHERE LOWER(TRIM(sbrn)) = LOWER(TRIM(%s))
@@ -3881,7 +4053,7 @@ def save_practical_marks(
                         = LOWER(TRIM(%s))
                   AND LOWER(TRIM(COALESCE(semester, '')))
                         = LOWER(TRIM(%s))
-                  AND LOWER(TRIM(COALESCE(section, '')))
+                  AND LOWER(TRIM(COALESCE({student_selector_column}, '')))
                         = LOWER(TRIM(%s))
                   AND COALESCE(status_locked, 0) = 0
                   AND UPPER(TRIM(COALESCE(academic_status, 'ACTIVE')))
@@ -3891,7 +4063,7 @@ def save_practical_marks(
                 sbrn,
                 department,
                 semester,
-                group,
+                student_selector_value,
             ))
 
             if cur.fetchone() is None:
@@ -3899,7 +4071,7 @@ def save_practical_marks(
                     status_code=403,
                     detail=(
                         f"Student {sbrn} is not an active student "
-                        "of the selected group."
+                        f"of the selected {selector_label}."
                     )
                 )
 
@@ -4089,13 +4261,18 @@ def save_practical_marks(
         except RuntimeError:
             pass
 
+        selector_label = (
+            f"Group={group}" if group
+            else f"Section={section}"
+        )
+
         print(
             "💾 PRACTICAL MARKS SAVED → "
             f"Faculty={faculty_id} | "
             f"Department={department} | "
             f"Semester={semester} | "
             f"Subject={subject_id} | "
-            f"Group={group} | "
+            f"{selector_label} | "
             f"Practical={practical_number} | "
             f"Students={saved_students} | "
             f"Components={saved_components}"
@@ -4108,7 +4285,8 @@ def save_practical_marks(
             "department": department,
             "semester": semester,
             "subject_id": subject_id,
-            "group": group,
+            "group": group or None,
+            "section": section or None,
             "practical_number": practical_number,
             "students_saved": saved_students,
             "components_saved": saved_components,
