@@ -3347,6 +3347,176 @@ def get_practical_subjects(
 
 
 # ======================================================
+# CLASS TEST — THEORY SUBJECTS
+# ======================================================
+#
+# Class Tests are only for THEORY subjects.
+#
+# Faculty assignment comes from timetable_slots.
+# Section is NOT used here.
+# ======================================================
+
+@app.get("/class-test-subjects")
+def get_class_test_subjects(
+    faculty_id: str,
+    department: str,
+    semester: str,
+):
+    faculty_id = str(faculty_id or "").strip()
+    department = str(department or "").strip()
+    semester = str(semester or "").strip()
+
+    if not faculty_id:
+        raise HTTPException(
+            status_code=400,
+            detail="faculty_id is required",
+        )
+
+    if not department:
+        raise HTTPException(
+            status_code=400,
+            detail="department is required",
+        )
+
+    if not semester:
+        raise HTTPException(
+            status_code=400,
+            detail="semester is required",
+        )
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT DISTINCT
+                TRIM(t.subject_id) AS subject_id,
+
+                COALESCE(
+                    NULLIF(TRIM(s.subject_name), ''),
+                    TRIM(t.subject_id)
+                ) AS subject_name,
+
+                COALESCE(
+                    NULLIF(TRIM(s.type), ''),
+                    NULLIF(TRIM(t.type), ''),
+                    'THEORY'
+                ) AS subject_type
+
+            FROM timetable_slots t
+
+            LEFT JOIN subjects s
+                ON LOWER(TRIM(s.subject_id))
+                 = LOWER(TRIM(t.subject_id))
+
+            WHERE LOWER(TRIM(t.faculty_id))
+                    = LOWER(TRIM(%s))
+
+              AND LOWER(TRIM(t.department))
+                    = LOWER(TRIM(%s))
+
+              AND LOWER(TRIM(t.semester))
+                    = LOWER(TRIM(%s))
+
+              AND t.subject_id IS NOT NULL
+
+              AND TRIM(t.subject_id) <> ''
+
+              -- ONLY THEORY SUBJECTS
+              AND UPPER(
+                    TRIM(
+                        COALESCE(
+                            s.type,
+                            t.type,
+                            'THEORY'
+                        )
+                    )
+                  ) NOT IN (
+                      'LAB',
+                      'PRACTICAL',
+                      'PRACTICALS',
+                      'WORKSHOP'
+                  )
+
+              -- Do not include subjects explicitly
+              -- identified as practical by _P.
+              AND UPPER(TRIM(t.subject_id))
+                    NOT LIKE '%%_P'
+
+            ORDER BY
+                TRIM(t.subject_id)
+        """, (
+            faculty_id,
+            department,
+            semester,
+        ))
+
+        rows = cur.fetchall()
+
+        subjects = []
+
+        seen = set()
+
+        for row in rows:
+            subject_id = str(
+                row[0] or ""
+            ).strip()
+
+            if not subject_id:
+                continue
+
+            # Extra duplicate protection.
+            key = subject_id.lower()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            subjects.append({
+                "subject_id": subject_id,
+                "subject_name": str(
+                    row[1] or subject_id
+                ).strip(),
+                "type": str(
+                    row[2] or "THEORY"
+                ).strip(),
+            })
+
+        print(
+            "📚 CLASS TEST THEORY SUBJECTS → "
+            f"Faculty={faculty_id} | "
+            f"Department={department} | "
+            f"Semester={semester} | "
+            f"Subjects={len(subjects)}"
+        )
+
+        return {
+            "status": "success",
+            "faculty_id": faculty_id,
+            "department": department,
+            "semester": semester,
+            "subjects": subjects,
+        }
+
+    except Exception as e:
+        print(
+            "❌ CLASS TEST SUBJECTS ERROR:",
+            e,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Failed to load class test subjects: "
+                f"{str(e)}"
+            ),
+        )
+
+    finally:
+        release_db(conn)
+
+# ======================================================
 # PRACTICAL MARKS — COMMON HELPERS
 # ======================================================
 
@@ -7415,6 +7585,737 @@ def get_workshop_students(
 # ======================================================
 # GET STUDENTS (SYNC SAFE VERSION - FINAL FIXED)
 # ======================================================
+
+
+# ======================================================
+# CLASS TESTS
+# THEORY SUBJECTS ONLY
+# ======================================================
+
+_CLASS_TEST_EXAM_TYPES = {
+    "1": "Class Test 1",
+    "2": "Class Test 2",
+    "3": "Class Test 3",
+    "class test 1": "Class Test 1",
+    "class test 2": "Class Test 2",
+    "class test 3": "Class Test 3",
+}
+
+
+def _normalize_class_test_number(value: str) -> str:
+    key = str(value or "").strip().lower()
+    if key not in _CLASS_TEST_EXAM_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="test_number must be Class Test 1, Class Test 2 or Class Test 3",
+        )
+    return _CLASS_TEST_EXAM_TYPES[key]
+
+
+def _verify_class_test_subject_assignment(
+    cur,
+    faculty_id: str,
+    department: str,
+    semester: str,
+    subject_id: str,
+):
+    """
+    Class Tests are theory-only and have no section selector.
+
+    Faculty subject assignment is resolved from the actual timetable,
+    which is already the authoritative workload source in this API.
+    The subject must have at least one timetable record for the faculty,
+    department and semester, and its effective type must be theory.
+    """
+    cur.execute(
+        """
+        SELECT 1
+        FROM timetable_slots t
+        LEFT JOIN subjects s
+          ON LOWER(TRIM(s.subject_id))
+           = LOWER(TRIM(t.subject_id))
+         AND LOWER(TRIM(COALESCE(s.semester, '')))
+           = LOWER(TRIM(t.semester))
+         AND LOWER(TRIM(COALESCE(s.department, '')))
+           = LOWER(TRIM(%s))
+        WHERE LOWER(TRIM(COALESCE(t.faculty_id, '')))
+              = LOWER(TRIM(%s))
+          AND LOWER(TRIM(COALESCE(t.department, '')))
+              = LOWER(TRIM(%s))
+          AND LOWER(TRIM(COALESCE(t.semester, '')))
+              = LOWER(TRIM(%s))
+          AND LOWER(TRIM(COALESCE(t.subject_id, '')))
+              = LOWER(TRIM(%s))
+          AND UPPER(
+                TRIM(
+                    COALESCE(
+                        NULLIF(TRIM(t.type), ''),
+                        NULLIF(TRIM(s.type), ''),
+                        'THEORY'
+                    )
+                )
+              ) NOT IN (
+                  'LAB',
+                  'PRACTICAL',
+                  'PRACTICALS',
+                  'WORKSHOP'
+              )
+          AND UPPER(TRIM(COALESCE(t.subject_id, ''))) NOT LIKE '%%_P'
+        LIMIT 1
+        """,
+        (
+            department,
+            faculty_id,
+            department,
+            semester,
+            subject_id,
+        ),
+    )
+
+    if cur.fetchone() is None:
+        raise HTTPException(
+            status_code=403,
+            detail="This theory subject is not assigned to the faculty for the selected class.",
+        )
+
+
+@app.get("/class-test-subjects")
+def get_class_test_subjects(
+    faculty_id: str,
+    department: str,
+    semester: str,
+):
+    """
+    Return theory subjects assigned to the faculty for Department + Semester.
+
+    There is deliberately NO section parameter. Class Tests operate on
+    the complete active class.
+    """
+    faculty_id = str(faculty_id or "").strip()
+    department = str(department or "").strip()
+    semester = str(semester or "").strip()
+
+    if not faculty_id:
+        raise HTTPException(status_code=400, detail="faculty_id is required")
+    if not department:
+        raise HTTPException(status_code=400, detail="department is required")
+    if not semester:
+        raise HTTPException(status_code=400, detail="semester is required")
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT
+                TRIM(t.subject_id) AS subject_id,
+                COALESCE(
+                    NULLIF(TRIM(s.subject_name), ''),
+                    TRIM(t.subject_id)
+                ) AS subject_name,
+                COALESCE(
+                    NULLIF(TRIM(t.type), ''),
+                    NULLIF(TRIM(s.type), ''),
+                    'THEORY'
+                ) AS subject_type
+            FROM timetable_slots t
+            LEFT JOIN subjects s
+              ON LOWER(TRIM(s.subject_id))
+               = LOWER(TRIM(t.subject_id))
+             AND LOWER(TRIM(COALESCE(s.semester, '')))
+               = LOWER(TRIM(t.semester))
+             AND LOWER(TRIM(COALESCE(s.department, '')))
+               = LOWER(TRIM(%s))
+            WHERE LOWER(TRIM(COALESCE(t.faculty_id, '')))
+                  = LOWER(TRIM(%s))
+              AND LOWER(TRIM(COALESCE(t.department, '')))
+                  = LOWER(TRIM(%s))
+              AND LOWER(TRIM(COALESCE(t.semester, '')))
+                  = LOWER(TRIM(%s))
+              AND t.subject_id IS NOT NULL
+              AND TRIM(t.subject_id) <> ''
+              AND UPPER(
+                    TRIM(
+                        COALESCE(
+                            NULLIF(TRIM(t.type), ''),
+                            NULLIF(TRIM(s.type), ''),
+                            'THEORY'
+                        )
+                    )
+                  ) NOT IN (
+                      'LAB',
+                      'PRACTICAL',
+                      'PRACTICALS',
+                      'WORKSHOP'
+                  )
+              AND UPPER(TRIM(t.subject_id)) NOT LIKE '%%_P'
+            ORDER BY
+                COALESCE(
+                    NULLIF(TRIM(s.subject_name), ''),
+                    TRIM(t.subject_id)
+                ),
+                TRIM(t.subject_id)
+            """,
+            (
+                department,
+                faculty_id,
+                department,
+                semester,
+            ),
+        )
+
+        subjects = []
+        seen = set()
+
+        for row in cur.fetchall():
+            subject_id = str(row[0] or "").strip()
+            if not subject_id:
+                continue
+
+            key = subject_id.lower()
+            if key in seen:
+                continue
+
+            seen.add(key)
+            subjects.append(
+                {
+                    "subject_id": subject_id,
+                    "subject_name": str(row[1] or subject_id).strip(),
+                    "type": str(row[2] or "THEORY").strip(),
+                }
+            )
+
+        print(
+            "📚 CLASS TEST THEORY SUBJECTS → "
+            f"Faculty={faculty_id} | "
+            f"Department={department} | "
+            f"Semester={semester} | "
+            f"Subjects={len(subjects)}"
+        )
+
+        return {
+            "status": "success",
+            "faculty_id": faculty_id,
+            "department": department,
+            "semester": semester,
+            "subjects": subjects,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print("❌ CLASS TEST SUBJECTS ERROR:", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load class test subjects: {str(e)}",
+        )
+
+    finally:
+        release_db(conn)
+
+
+@app.get("/class-test-marks")
+def get_class_test_marks(
+    faculty_id: str,
+    department: str,
+    semester: str,
+    subject_id: str,
+    test_number: str,
+):
+    """
+    Load saved Class Test marks.
+
+    Logical identity remains the existing exam_marks identity:
+        sbrn + semester + exam_type + subject_id
+
+    No section is part of Class Test identity.
+    """
+    faculty_id = str(faculty_id or "").strip()
+    department = str(department or "").strip()
+    semester = str(semester or "").strip()
+    subject_id = str(subject_id or "").strip()
+    exam_type = _normalize_class_test_number(test_number)
+
+    if not faculty_id:
+        raise HTTPException(status_code=400, detail="faculty_id is required")
+    if not department:
+        raise HTTPException(status_code=400, detail="department is required")
+    if not semester:
+        raise HTTPException(status_code=400, detail="semester is required")
+    if not subject_id:
+        raise HTTPException(status_code=400, detail="subject_id is required")
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        _verify_class_test_subject_assignment(
+            cur,
+            faculty_id,
+            department,
+            semester,
+            subject_id,
+        )
+
+        cur.execute(
+            """
+            SELECT
+                em.sbrn,
+                em.marks,
+                em.max_marks,
+                em.exam_date,
+                em.version
+            FROM exam_marks em
+            INNER JOIN students st
+              ON LOWER(TRIM(st.sbrn))
+               = LOWER(TRIM(em.sbrn))
+            WHERE LOWER(TRIM(em.semester))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(em.exam_type))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(COALESCE(em.subject_id, '')))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(COALESCE(st.department, '')))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(COALESCE(st.semester, '')))
+                    = LOWER(TRIM(%s))
+              AND COALESCE(st.status_locked, 0) = 0
+              AND UPPER(
+                    TRIM(
+                        COALESCE(st.academic_status, 'ACTIVE')
+                    )
+                  ) = 'ACTIVE'
+            ORDER BY
+                st.sr_no ASC,
+                st.sbrn ASC,
+                em.id DESC
+            """,
+            (
+                semester,
+                exam_type,
+                subject_id,
+                department,
+                semester,
+            ),
+        )
+
+        rows = []
+        seen = set()
+        max_marks = None
+
+        for row in cur.fetchall():
+            sbrn = str(row[0] or "").strip()
+            if not sbrn or sbrn.lower() in seen:
+                continue
+
+            seen.add(sbrn.lower())
+
+            if row[2] is not None and max_marks is None:
+                try:
+                    max_marks = int(row[2])
+                except (TypeError, ValueError):
+                    max_marks = None
+
+            rows.append(
+                {
+                    "sbrn": sbrn,
+                    "marks": row[1],
+                    "max_marks": row[2],
+                    "exam_date": (
+                        row[3].isoformat()
+                        if hasattr(row[3], "isoformat")
+                        else row[3]
+                    ),
+                    "version": row[4],
+                }
+            )
+
+        return {
+            "status": "success",
+            "faculty_id": faculty_id,
+            "department": department,
+            "semester": semester,
+            "subject_id": subject_id,
+            "test_number": exam_type,
+            "max_marks": max_marks,
+            "students": rows,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print("❌ CLASS TEST MARKS GET ERROR:", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load class test marks: {str(e)}",
+        )
+
+    finally:
+        release_db(conn)
+
+
+@app.post("/class-test-marks")
+def save_class_test_marks(payload: dict = Body(...)):
+    """
+    Save Class Test marks for the complete active class.
+
+    Blank/null marks clear the saved value.
+    There is intentionally NO section field.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload")
+
+    faculty_id = str(payload.get("faculty_id") or "").strip()
+    department = str(payload.get("department") or "").strip()
+    semester = str(payload.get("semester") or "").strip()
+    subject_id = str(payload.get("subject_id") or "").strip()
+    exam_type = _normalize_class_test_number(payload.get("test_number"))
+
+    if not faculty_id:
+        raise HTTPException(status_code=400, detail="faculty_id is required")
+    if not department:
+        raise HTTPException(status_code=400, detail="department is required")
+    if not semester:
+        raise HTTPException(status_code=400, detail="semester is required")
+    if not subject_id:
+        raise HTTPException(status_code=400, detail="subject_id is required")
+
+    raw_max_marks = payload.get("max_marks", 20)
+
+    try:
+        max_marks_float = float(raw_max_marks)
+        if not max_marks_float.is_integer():
+            raise ValueError
+        max_marks = int(max_marks_float)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="max_marks must be a whole number",
+        )
+
+    if max_marks <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="max_marks must be greater than zero",
+        )
+
+    students_payload = payload.get("students")
+
+    if not isinstance(students_payload, list):
+        raise HTTPException(
+            status_code=400,
+            detail="students must be a list",
+        )
+
+    conn = connect_db()
+    cur = conn.cursor()
+
+    try:
+        _verify_class_test_subject_assignment(
+            cur,
+            faculty_id,
+            department,
+            semester,
+            subject_id,
+        )
+
+        # ----------------------------------------------------------
+        # Active students are authoritative on the server.
+        # This prevents saving marks against another department,
+        # semester, locked student or inactive student.
+        # ----------------------------------------------------------
+        cur.execute(
+            """
+            SELECT
+                sbrn
+            FROM students
+            WHERE LOWER(TRIM(COALESCE(department, '')))
+                    = LOWER(TRIM(%s))
+              AND LOWER(TRIM(COALESCE(semester, '')))
+                    = LOWER(TRIM(%s))
+              AND COALESCE(status_locked, 0) = 0
+              AND UPPER(
+                    TRIM(
+                        COALESCE(academic_status, 'ACTIVE')
+                    )
+                  ) = 'ACTIVE'
+            """,
+            (department, semester),
+        )
+
+        active_sbrns = {
+            str(row[0] or "").strip().lower()
+            for row in cur.fetchall()
+            if str(row[0] or "").strip()
+        }
+
+        now = datetime.now()
+        saved = 0
+        cleared = 0
+
+        for index, item in enumerate(students_payload, start=1):
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid student row {index}",
+                )
+
+            sbrn = str(item.get("sbrn") or "").strip()
+
+            if not sbrn:
+                continue
+
+            if sbrn.lower() not in active_sbrns:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Student {sbrn} is not an active student "
+                        "of the selected department and semester."
+                    ),
+                )
+
+            marks = item.get("marks")
+
+            # Blank/null means CLEAR the saved mark.
+            if marks is None or (
+                isinstance(marks, str) and not marks.strip()
+            ):
+                numeric_marks = None
+            else:
+                try:
+                    numeric_value = float(marks)
+
+                    if not numeric_value.is_integer():
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Marks must be a whole number for {sbrn}.",
+                        )
+
+                    numeric_marks = int(numeric_value)
+
+                except HTTPException:
+                    raise
+
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid marks for {sbrn}.",
+                    )
+
+                if numeric_marks < 0 or numeric_marks > max_marks:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Marks for {sbrn} must be between "
+                            f"0 and {max_marks}."
+                        ),
+                    )
+
+            # Existing exam_marks logical identity:
+            # sbrn + semester + exam_type + subject_id
+            cur.execute(
+                """
+                SELECT id, version
+                FROM exam_marks
+                WHERE LOWER(TRIM(sbrn))
+                        = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(semester))
+                        = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(exam_type))
+                        = LOWER(TRIM(%s))
+                  AND LOWER(TRIM(COALESCE(subject_id, '')))
+                        = LOWER(TRIM(%s))
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (
+                    sbrn,
+                    semester,
+                    exam_type,
+                    subject_id,
+                ),
+            )
+
+            existing = cur.fetchone()
+
+            if existing is not None:
+                cur.execute(
+                    """
+                    UPDATE exam_marks
+                    SET
+                        marks = %s,
+                        max_marks = %s,
+                        last_updated = %s,
+                        version = COALESCE(version, 0) + 1,
+                        sync_pending = 0
+                    WHERE id = %s
+                    """,
+                    (
+                        numeric_marks,
+                        max_marks,
+                        now,
+                        existing[0],
+                    ),
+                )
+
+            else:
+                # Keep the same cloud-side ID strategy already used by
+                # the existing Practical Marks / exam_marks code.
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(7465321)"
+                )
+
+                cur.execute(
+                    """
+                    SELECT COALESCE(MAX(id), 0) + 1
+                    FROM exam_marks
+                    """
+                )
+
+                next_id_row = cur.fetchone()
+                next_id = (
+                    int(next_id_row[0])
+                    if next_id_row and next_id_row[0] is not None
+                    else 1
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO exam_marks
+                    (
+                        id,
+                        sbrn,
+                        semester,
+                        exam_type,
+                        subject_id,
+                        marks,
+                        max_marks,
+                        exam_date,
+                        last_updated,
+                        version,
+                        sync_pending
+                    )
+                    VALUES
+                    (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        NULL,
+                        %s,
+                        1,
+                        0
+                    )
+                    """,
+                    (
+                        next_id,
+                        sbrn,
+                        semester,
+                        exam_type,
+                        subject_id,
+                        numeric_marks,
+                        max_marks,
+                        now,
+                    ),
+                )
+
+                try:
+                    cur.execute(
+                        """
+                        SELECT pg_get_serial_sequence(
+                            'exam_marks',
+                            'id'
+                        )
+                        """
+                    )
+                    sequence_row = cur.fetchone()
+
+                    if sequence_row and sequence_row[0]:
+                        cur.execute(
+                            "SELECT setval(%s, %s, true)",
+                            (
+                                sequence_row[0],
+                                next_id,
+                            ),
+                        )
+                except Exception as sequence_error:
+                    # The explicit ID is already valid. Do not make a
+                    # successful Class Test save fail only because a legacy
+                    # deployment has no serial sequence.
+                    print(
+                        "⚠️ CLASS TEST sequence sync skipped:",
+                        sequence_error,
+                    )
+
+            if numeric_marks is None:
+                cleared += 1
+            else:
+                saved += 1
+
+        conn.commit()
+
+        try:
+            # Keep the same realtime mechanism used by exam_marks.
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(broadcast_event("exam_marks"))
+            except RuntimeError:
+                pass
+        except Exception as broadcast_error:
+            print(
+                "⚠️ CLASS TEST broadcast skipped:",
+                broadcast_error,
+            )
+
+        print(
+            "💾 CLASS TEST MARKS SAVED → "
+            f"Faculty={faculty_id} | "
+            f"Department={department} | "
+            f"Semester={semester} | "
+            f"Subject={subject_id} | "
+            f"Exam={exam_type} | "
+            f"Max={max_marks} | "
+            f"Saved={saved} | "
+            f"Cleared={cleared}"
+        )
+
+        return {
+            "status": "success",
+            "message": "Class Test marks saved successfully",
+            "faculty_id": faculty_id,
+            "department": department,
+            "semester": semester,
+            "subject_id": subject_id,
+            "test_number": exam_type,
+            "max_marks": max_marks,
+            "saved": saved,
+            "cleared": cleared,
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+
+    except Exception as e:
+        conn.rollback()
+        print("❌ CLASS TEST MARKS SAVE ERROR:", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save class test marks: {str(e)}",
+        )
+
+    finally:
+        release_db(conn)
+
+
 
 @app.get("/students")
 def get_students(
